@@ -65,13 +65,12 @@ def parent_of(repo, merge_commit: str | None) -> str | None:
     return res.stdout.strip() or None
 
 
-def build(cfg: dict) -> list[RLTask]:
+def iter_tasks(cfg: dict):
+    """Yield one RLTask per verifiable PR (lazy → enables incremental writing)."""
     repo = config.ROOT / cfg["source"]["raw_repo"]
     prs_path = config.ROOT / "data/datasets/github_prs.jsonl"
     if not prs_path.exists():
         raise FileNotFoundError("run ingest_github first to produce github_prs.jsonl")
-
-    tasks: list[RLTask] = []
     for line in prs_path.read_text().splitlines():
         pr = json.loads(line)
         if not pr["test_files"]:
@@ -80,21 +79,23 @@ def build(cfg: dict) -> list[RLTask]:
         single = len(touched) == 1
         crate = next(iter(touched)) if touched else None
         verify = f"cargo nextest run -p {crate}" if single and crate else "cargo nextest run"
-        tasks.append(
-            RLTask(
-                task_id=f"hs-pr-{pr['number']}",
-                pr_number=pr["number"],
-                parent_commit=parent_of(repo, pr["merge_commit"]),
-                issue_text=(pr["title"] + "\n\n" + pr["body"]),
-                gold_files=pr["changed_files"],
-                test_files=pr["test_files"],
-                crates=sorted(touched),
-                single_crate=single,
-                verify_cmd=verify,
-                verify_mode=verify_mode(touched),
-            )
+        yield RLTask(
+            task_id=f"hs-pr-{pr['number']}",
+            pr_number=pr["number"],
+            parent_commit=parent_of(repo, pr["merge_commit"]),
+            issue_text=(pr["title"] + "\n\n" + pr["body"]),
+            gold_files=pr["changed_files"],
+            test_files=pr["test_files"],
+            crates=sorted(touched),
+            single_crate=single,
+            verify_cmd=verify,
+            verify_mode=verify_mode(touched),
         )
-    return tasks
+
+
+def build(cfg: dict) -> list[RLTask]:
+    """In-memory build (tests/ad-hoc). Production path: build_and_save (incremental)."""
+    return list(iter_tasks(cfg))
 
 
 def save(tasks: list[RLTask], path: str = "data/datasets/rl_tasks.jsonl") -> int:
@@ -106,9 +107,25 @@ def save(tasks: list[RLTask], path: str = "data/datasets/rl_tasks.jsonl") -> int
     return len(tasks)
 
 
+def build_and_save(cfg: dict, path: str = "data/datasets/rl_tasks.jsonl", batch: int = 10) -> tuple[int, int]:
+    """Stream tasks to `path`, flushing every `batch` — crash-safe + visible progress."""
+    out = config.ROOT / path
+    out.parent.mkdir(parents=True, exist_ok=True)
+    total = single_n = 0
+    buf: list[RLTask] = []
+    with out.open("w") as f:
+        for t in iter_tasks(cfg):
+            buf.append(t); total += 1; single_n += int(t.single_crate)
+            if len(buf) >= batch:
+                for x in buf:
+                    f.write(json.dumps(asdict(x)) + "\n")
+                f.flush(); buf = []
+                print(f"  built {total} RL tasks ({single_n} single-crate) -> {path}", flush=True)
+        for x in buf:
+            f.write(json.dumps(asdict(x)) + "\n")
+    print(f"RL tasks: {total} total; {single_n} single-crate (cheap-verify candidates)", flush=True)
+    return total, single_n
+
+
 if __name__ == "__main__":
-    cfg = config.load("data")
-    tasks = build(cfg)
-    single = [t for t in tasks if t.single_crate]
-    save(tasks)
-    print(f"RL tasks: {len(tasks)} total; {len(single)} single-crate (cheap-verify candidates)")
+    build_and_save(config.load("data"))

@@ -17,12 +17,12 @@ data:
   assistant_only_loss: true       # mask user/system/tool-observation tokens
 
 teacher:
-  # LOCKED: Qwen3.5-122B-A10B (MoE, ~10B active). Apache-2.0 => distilled outputs are
-  # license-clean to train on AND publish (public repo). Self-hosted via vLLM in NVFP4
-  # on the GX10 (~61GB weights). Same family as the 9B student (distribution match).
-  # Most SOLUTIONS come from repo gold (real connector code / PR diffs); the teacher
-  # mainly phrases instructions + reasoning -> minimal hallucination + licensing exposure.
-  model: "Qwen/Qwen3.5-27B"       # local teacher: dense 27B (bf16 ~54GB), served bf16 on the GB10
+  # Local teacher served via vLLM on the GB10 (Phase A; never co-resident with the student).
+  # Apache-2.0 => distilled outputs are license-clean to train on AND publish (public repo).
+  # Same family as the 9B student (distribution match). Most SOLUTIONS come from repo gold
+  # (connector code / PR diffs); the teacher mainly phrases instructions + reasoning.
+  model: "Qwen/Qwen3.5-27B"       # dense 27B, served bf16 (~54GB); evaluated 122B-A10B (too big
+                                  # to serve) and Nemotron-3-Nano-30B NVFP4 (lighter) — chose 27B for code
   endpoint: "http://localhost:8000"
   mode: "offline"                 # generate -> dump -> then train (decouples memory, Risk R5)
   frontier_api_topup: false       # optional small hard-trace seed; OFF by default (ToS/cost)

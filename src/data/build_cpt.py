@@ -79,8 +79,9 @@ class Packed:
     meta: dict
 
 
-def build_phase1(cfg: dict) -> list[Packed]:
-    """Foundation: dependency-ordered packing with file markers, document-masked, FIM ~rate."""
+def build_phase1(cfg: dict):
+    """Foundation: dependency-ordered packing with file markers, document-masked, FIM ~rate.
+    Yields one Packed per (deduped) file so writing can stream."""
     repo = config.ROOT / cfg["source"]["raw_repo"]
     files = ingest_repos.iter_source_files(cfg, repo)
     pairs: list[tuple[str, str]] = []
@@ -90,30 +91,26 @@ def build_phase1(cfg: dict) -> list[Packed]:
             pairs.append((rel, p.read_text(encoding="utf-8", errors="ignore")))
         except OSError:
             continue
-    pairs = dedup(pairs, cfg["cpt"]["dedup_jaccard"])
+    pairs = dedup(pairs, cfg["cpt"]["dedup_jaccard"])  # dedup needs the full set; output streams
 
     fim_rate = cfg["cpt"]["fim_rate"]
     marker = cfg["cpt"]["file_marker"]
-    out: list[Packed] = []
     # Each packed sample = one file (document-masked => no cross-file attention bleed).
-    # Real packing into fixed windows happens in the trainer with the tokenizer + EOS.
     for idx, (rel, content) in enumerate(pairs):
         body = marker.format(path=rel) + content
         # deterministic FIM assignment (no RNG -> reproducible): alternate PSM/SPM
         if rel.endswith(".rs") and (idx % 100) < int(fim_rate * 100):
             body = apply_fim(body, "psm" if idx % 2 == 0 else "spm")
-        out.append(Packed(training_content=body, meta={"path": rel, "phase": "foundation"}))
-    return out
+        yield Packed(training_content=body, meta={"path": rel, "phase": "foundation"})
 
 
-def build_phase2(cfg: dict, max_commits: int = 5000) -> list[Packed]:
-    """Evolution: conventional-commit message + diff as intent->change pairs."""
+def build_phase2(cfg: dict, max_commits: int = 5000):
+    """Evolution: conventional-commit message + diff as intent->change pairs (streamed)."""
     repo = config.ROOT / cfg["source"]["raw_repo"]
     log = subprocess.run(
         ["git", "-C", str(repo), "log", f"-n{max_commits}", "--format=%H%x00%s%x00%b"],
         capture_output=True, text=True, check=True,
     ).stdout
-    out: list[Packed] = []
     for line in log.split("\n"):
         if not line.strip():
             continue
@@ -126,33 +123,40 @@ def build_phase2(cfg: dict, max_commits: int = 5000) -> list[Packed]:
             capture_output=True, text=True, check=False,
         ).stdout[:20000]  # cap diff size
         content = f"# Commit intent\n{subject}\n\n# Change\n{diff}"
-        out.append(Packed(training_content=content, meta={"sha": sha, "phase": "evolution"}))
-    return out
+        yield Packed(training_content=content, meta={"sha": sha, "phase": "evolution"})
 
 
-def build_phase3(cfg: dict) -> list[Packed]:
-    """PR Mastery: intent (issue/PR body) -> change -> review discussion."""
+def build_phase3(cfg: dict):
+    """PR Mastery: intent (issue/PR body) -> change -> review discussion (streamed)."""
     prs_path = config.ROOT / "data/datasets/github_prs.jsonl"
-    out: list[Packed] = []
     if not prs_path.exists():
-        return out  # run ingest_github first
+        return  # run ingest_github first
     for line in prs_path.read_text().splitlines():
         pr = json.loads(line)
         content = (
             f"# PR #{pr['number']}: {pr['title']}\n\n{pr['body']}\n\n"
             f"# Files changed\n" + "\n".join(pr["changed_files"])
         )
-        out.append(Packed(training_content=content, meta={"pr": pr["number"], "phase": "pr_mastery"}))
-    return out
+        yield Packed(training_content=content, meta={"pr": pr["number"], "phase": "pr_mastery"})
 
 
-def _write(samples: list[Packed], name: str) -> int:
+def _write(samples, name: str, batch: int = 50) -> int:
+    """Stream samples (list OR generator) to jsonl, flushing every `batch` — crash-safe + visible."""
     out = config.ROOT / "data/datasets" / name
     out.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    buf: list[Packed] = []
     with out.open("w") as f:
         for s in samples:
-            f.write(json.dumps({"training_content": s.training_content, "meta": s.meta}) + "\n")
-    return len(samples)
+            buf.append(s); n += 1
+            if len(buf) >= batch:
+                for x in buf:
+                    f.write(json.dumps({"training_content": x.training_content, "meta": x.meta}) + "\n")
+                f.flush(); buf = []
+                print(f"  wrote {n} -> {name}", flush=True)
+        for x in buf:
+            f.write(json.dumps({"training_content": x.training_content, "meta": x.meta}) + "\n")
+    return n
 
 
 def fingerprint(text: str) -> str:
@@ -161,8 +165,6 @@ def fingerprint(text: str) -> str:
 
 if __name__ == "__main__":
     cfg = config.load("data")
-    p1 = build_phase1(cfg)
-    print(f"phase1 foundation: {_write(p1, 'cpt_phase1.jsonl')} samples "
-          f"(~{sum(_approx_tokens(s.training_content) for s in p1) // 1_000_000}M tokens)")
+    print(f"phase1 foundation: {_write(build_phase1(cfg), 'cpt_phase1.jsonl')} samples")
     print(f"phase2 evolution:  {_write(build_phase2(cfg), 'cpt_phase2.jsonl')} samples")
     print(f"phase3 pr_mastery: {_write(build_phase3(cfg), 'cpt_phase3.jsonl')} samples")

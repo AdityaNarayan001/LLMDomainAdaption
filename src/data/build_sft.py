@@ -63,9 +63,18 @@ def build(cfg: dict) -> tuple[list[dict], list[dict]]:
 
     raw_instr = raw_dir / "sft_instructions_raw.jsonl"
     if raw_instr.exists():
+        kept = skipped = 0
         for line in raw_instr.read_text().splitlines():
-            r = json.loads(line)
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                skipped += 1; continue
+            # validate teacher output schema before trusting it
+            if not all(str(r.get(k, "")).strip() for k in ("snippet", "problem", "solution")):
+                skipped += 1; continue
             instructions.append(assemble_instruction(r["snippet"], r["problem"], r["solution"]))
+            kept += 1
+        print(f"instructions: kept {kept}, skipped {skipped} malformed/empty teacher outputs")
 
     raw_traj = raw_dir / "sft_trajectories_raw.jsonl"
     if raw_traj.exists():

@@ -22,9 +22,58 @@ def _token() -> str | None:
     return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
 
 
+def _pr_record(pr: dict, headers: dict) -> "PRRecord":
+    fr = requests.get(pr["url"] + "/files", params={"per_page": 100}, headers=headers, timeout=60)
+    files = [f["filename"] for f in fr.json()] if fr.ok else []
+    tests = [f for f in files if "/tests/" in f or f.endswith("_test.rs") or f.startswith("tests/")]
+    m = _CLOSES.search(pr.get("body") or "")
+    return PRRecord(number=pr["number"], title=pr.get("title", ""), body=pr.get("body") or "",
+                    merge_commit=pr.get("merge_commit_sha"), parent_commit=None,
+                    changed_files=files, test_files=tests,
+                    linked_issue=(int(m.group(1)) if m else None))
+
+
+def mine_merged_prs(repo: str, limit: int = 1000,
+                    out_path: str = "data/datasets/github_prs.jsonl", batch: int = 10) -> int:
+    """Token-based REST mining that APPENDS to out_path in batches of `batch` as it goes —
+    crash-safe + visible progress (no collect-all-then-write). Returns count written."""
+    tok = _token()
+    h = {"Accept": "application/vnd.github+json",
+         **({"Authorization": f"Bearer {tok}"} if tok else {})}
+    out = config.ROOT / out_path
+    out.parent.mkdir(parents=True, exist_ok=True)
+    written, buf, page = 0, [], 1
+    with out.open("w") as f:
+        while written + len(buf) < limit:
+            r = requests.get(f"https://api.github.com/repos/{repo}/pulls",
+                             params={"state": "closed", "per_page": 100, "page": page},
+                             headers=h, timeout=60)
+            r.raise_for_status()
+            prs = r.json()
+            if not prs:
+                break
+            for pr in prs:
+                if not pr.get("merged_at"):
+                    continue
+                buf.append(_pr_record(pr, h))
+                if len(buf) >= batch:                       # flush a batch -> visible + crash-safe
+                    for rec in buf:
+                        f.write(json.dumps(asdict(rec)) + "\n")
+                    f.flush()
+                    written += len(buf); buf = []
+                    print(f"  mined {written} merged PRs -> {out_path}", flush=True)
+                if written + len(buf) >= limit:
+                    break
+            page += 1
+        for rec in buf:                                     # final partial batch
+            f.write(json.dumps(asdict(rec)) + "\n")
+        written += len(buf)
+    print(f"mined {written} merged PRs (batched x{batch}) -> {out_path}", flush=True)
+    return written
+
+
 def fetch_merged_prs_rest(repo: str, limit: int = 1000) -> list["PRRecord"]:
-    """Token-based REST mining (no gh CLI). 5000 req/hr authenticated. Paginates closed
-    PRs, keeps merged ones, fetches changed files, links issues via body keywords."""
+    """In-memory variant (ad-hoc/tests). Production path uses mine_merged_prs (incremental)."""
     tok = _token()
     h = {"Accept": "application/vnd.github+json",
          **({"Authorization": f"Bearer {tok}"} if tok else {})}
@@ -39,17 +88,8 @@ def fetch_merged_prs_rest(repo: str, limit: int = 1000) -> list["PRRecord"]:
         if not prs:
             break
         for pr in prs:
-            if not pr.get("merged_at"):
-                continue
-            fr = requests.get(pr["url"] + "/files", params={"per_page": 100}, headers=h, timeout=60)
-            files = [f["filename"] for f in fr.json()] if fr.ok else []
-            tests = [f for f in files if "/tests/" in f or f.endswith("_test.rs") or f.startswith("tests/")]
-            m = _CLOSES.search(pr.get("body") or "")
-            out.append(PRRecord(
-                number=pr["number"], title=pr.get("title", ""), body=pr.get("body") or "",
-                merge_commit=pr.get("merge_commit_sha"), parent_commit=None,
-                changed_files=files, test_files=tests,
-                linked_issue=(int(m.group(1)) if m else None)))
+            if pr.get("merged_at"):
+                out.append(_pr_record(pr, h))
             if len(out) >= limit:
                 break
         page += 1
@@ -137,7 +177,13 @@ def save(records: list[PRRecord], path: str = "data/datasets/github_prs.jsonl") 
 
 if __name__ == "__main__":
     cfg = config.load("data")
-    prs = fetch_merged_prs(cfg["source"]["repo"], limit=cfg["github"]["per_page"] * 10)
-    n = save(prs)
-    with_tests = sum(1 for p in prs if p.test_files)
-    print(f"fetched {n} merged PRs; {with_tests} changed a test file")
+    repo = cfg["source"]["repo"]
+    limit = cfg["github"]["per_page"] * 10
+    if _token():                                   # production path: incremental batched write
+        mine_merged_prs(repo, limit=limit, batch=10)
+    elif gh_ready():                               # gh CLI: bulk, then write
+        save(fetch_merged_prs(repo, limit=limit))
+    else:
+        print("WARN: no GH_TOKEN and gh not authenticated — skipping PR mining "
+              "(RL/PR-Mastery empty; census will NO-GO).")
+        save([])

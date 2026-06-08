@@ -98,10 +98,13 @@ def generate(cfg: dict, teacher_cfg: dict, n: int = 2000) -> int:
         for path, snippet in sample_function_snippets(cfg, n):
             try:
                 raw = _call_teacher(endpoint, model, oss_instruct_prompt(path, snippet))
-                rec = json.loads(raw)
+                rec = json.loads(raw)            # skip-on-parse-error = teacher-output validation
                 rec["snippet"] = snippet
                 f.write(json.dumps(rec) + "\n")
+                f.flush()                        # crash-safe: each teacher call persisted
                 written += 1
+                if written % 50 == 0:
+                    print(f"  generated {written} instructions -> {out.name}", flush=True)
             except Exception:  # pragma: no cover - network/parse dependent
                 continue
     return written
@@ -134,7 +137,10 @@ def gen_trajectories(endpoint: str, model: str, weights: dict, n_tasks: int = 20
                     "chat": {"messages": traj.messages, "loss_mask": traj.loss_mask},
                     "reward": traj.reward,
                 }) + "\n")
+                f.flush()                        # crash-safe: each rollout persisted
                 written += 1
+                if written % 25 == 0:
+                    print(f"  generated {written} trajectories -> {out.name}", flush=True)
     return written
 
 
