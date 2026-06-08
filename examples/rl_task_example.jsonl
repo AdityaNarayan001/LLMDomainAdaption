@@ -1,0 +1,17 @@
+{
+  "task_id": "hs-pr-5012",
+  "pr_number": 5012,
+  "parent_commit": "a1b2c3d4e5f6",
+  "issue_text": "Refund returns Pending even after the gateway confirms success.",
+  "gold_files": [
+    "crates/hyperswitch_connectors/src/connectors/stripe/transformers.rs"
+  ],
+  "test_files": [
+    "crates/hyperswitch_connectors/src/connectors/stripe/tests.rs"
+  ],
+  "crates": [
+    "hyperswitch_connectors"
+  ],
+  "single_crate": true,
+  "verify_cmd": "cargo nextest run -p hyperswitch_connectors"
+}

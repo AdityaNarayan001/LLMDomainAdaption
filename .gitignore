@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Large / generated artifacts — NOT committed.
+# (ingested repo dump, tokenized corpora, trajectories)
+data/
+# (checkpoints, adapters)
+models/
+# (wandb / logs / per-cycle ledgers / rollouts / insight.txt)
+runs/
+*.parquet
+*.bin
+*.safetensors
+
+# Build caches for the hyperswitch verification env.
+target/
+sccache/
+
+# NOTE: eval_sets/ is intentionally COMMITTED (public repo) for reproducibility.

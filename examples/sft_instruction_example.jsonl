@@ -1,0 +1,21 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a Rust engineer working in the juspay/hyperswitch codebase. Use the provided tools to read, edit, and test code. Follow hyperswitch conventions (conventional commits, error types, connector patterns)."
+    },
+    {
+      "role": "user",
+      "content": "Add idempotency-key handling to the refund flow.\n\nRelevant code:\n```rust\npub fn refund(req: RefundRequest) -> Result<RefundResponse, Error> {\n    let amount = req.amount.ok_or(Error::MissingAmount)?;\n    Ok(RefundResponse { id: req.id, amount, status: Status::Pending })\n}\n\n```"
+    },
+    {
+      "role": "assistant",
+      "content": "To make refunds idempotent, thread an `idempotency_key` through `RefundRequest` and short-circuit if a refund with that key exists:\n```rust\nif let Some(k) = req.idempotency_key { /* lookup */ }\n```"
+    }
+  ],
+  "loss_mask": [
+    false,
+    false,
+    true
+  ]
+}

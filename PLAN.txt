@@ -1,0 +1,386 @@
+# Plan: Domain-Adapted Agentic Coding LLM (Company Codebase)
+
+## Context
+
+**Goal:** Fine-tune an open-weight LLM so it becomes a domain expert on our company codebase *and* an excellent agentic harness user (read/edit files, run tests in a loop), beating general models on our internal tasks — measured quantitatively.
+
+**Target codebase: [`juspay/hyperswitch`](https://github.com/juspay/hyperswitch)** — open-source Rust payments orchestrator. Concrete facts that shape this plan:
+- **~82% Rust** (~0.5–1M LOC), ~17% JavaScript (Cypress E2E + dashboard). → base model must be **strong at Rust**.
+- **Cargo workspace, 38 crates** under `crates/` (`router`, `hyperswitch_connectors`, `hyperswitch_domain_models`, `storage_impl`, `diesel_models`, `api_models`, `hyperswitch_interfaces`, `scheduler`, `drainer`, `euclid`, `common_utils`, …).
+- **136 payment connectors** in `crates/hyperswitch_connectors/` — a highly repetitive, well-specified pattern. This is a domain *superpower* to target (e.g. "implement connector X") for SFT/RL.
+- **Build/test is HEAVY**: release build ~45–60 min on 8 cores/16GB; tests need **Postgres + Redis** (docker-compose), some need wiremock-mocked connectors. MSRV Rust 1.85, edition 2021. → execution-based reward must be **cheap and targeted**, not full-suite (see Stage 4).
+- **Cheap deterministic signals available**: `cargo check`, `cargo clippy` (warnings-as-errors), `cargo +nightly fmt --check` — no DB needed, fast-ish, perfect for reward shaping.
+- **Rich eval material**: ~1,748 open issues + many closed issue→PR pairs with tests; strict **conventional commits** (`feat/fix/...(scope)`); `just`/`make` task runners; `cargo nextest` for fast targeted tests.
+- **Public repo** → code, eval sets, and trajectories can live openly (no private store; `.gitignore` only needs `data/`, `models/`, large artifacts).
+
+**Why now:** General models don't know our private code, conventions, or internal APIs. A domain-adapted model can be both cheaper to run and better on our tasks if (a) we train it on our code/docs/PRs/issues and (b) we train it to *act* well inside an agent harness.
+
+**Strategy (settled):** Multi-stage training —
+`CPT → SFT (agentic) → RL on harness → rigorous eval`, built **MVP-first**: prove the whole pipeline end-to-end on a small model on the **ASUS GX10** (GB10, ~128GB unified, FP4-capable single device), then scale out to multi-GPU (where the existing repo already targets 8×H200 / ZeRO-3).
+
+**Training time is NOT a constraint → run the pipeline as a continuous self-improving FLYWHEEL, not a one-shot.** After the initial `CPT→SFT→RL` pass, an outer loop runs indefinitely: the current best model does many harness rollouts → successful, verified trajectories become new SFT/RL data → retrain → re-eval → promote the checkpoint only if it beats the incumbent on held-out HS-bench → raise task difficulty → repeat. Each cycle compounds: more verified data, a stronger model, harder tasks. See **The Flywheel** section — it is the core of how we actually reach "beats other models."
+
+**Guiding principle — goal-first, not reference-bound.** The references below are *inputs and inspiration*, not constraints. We pick the strongest tool per stage and depart from any reference the moment a better path serves the goal. Concretely that means: the CPT repo's *design ideas* (phased curriculum, anti-forgetting adapter loading) are reused, but we are free to implement them on a more capable stack (Axolotl/LLaMA-Factory) rather than forking its code; and the RL stage is built on **SkyRL** (a maintained, purpose-built agentic-RL framework) rather than hand-rolling the Polar paper's ideas.
+
+**Three inputs we draw from:**
+- **`Phased-CPT-LLM-FineTuning`** (your repo): HF + PEFT/LoRA + TRL + DeepSpeed ZeRO-3, 3-phase curriculum (Foundation → Evolution → PR Mastery). We reuse the **curriculum design + anti-forgetting adapter loading + perplexity-callback** ideas for CPT. Implementation may be a fork *or* a config in a more capable trainer — whichever is less work to scale.
+- **SkyRL** (NovaSky AI, Apache-2.0): full-stack, modular **agentic RL** library — `skyrl-train` (PPO/GRPO/DAPO), `skyrl-agent` (multi-turn tool-use, OpenHands harness integration, async trajectory dispatch), `skyrl-gym` (tool-use task envs), `skyrl-tx` (**Tinker API** → same script runs single-device → multi-node, Ray + vLLM). Proven recipe: **SA-SWE-32B, 24.4%→39.4% Pass@1 on SWE-bench Verified (~15pp), trained on ~4.5K R2E-Gym task instances**; SkyRL-SQL-7B beat GPT-4o with 653 samples. **This is our RL backbone.**
+- **arXiv 2605.24220 — "Polar: Agentic RL on Any Harness at Scale"** (Xu et al., May 2026): the *theory* for the RL stage — treat the harness as a **black box**, reconstruct **token-faithful trajectories** for GRPO. SkyRL-Agent is essentially a production implementation of this idea; Polar informs how we wire our own company harness in as a black box later.
+
+---
+
+## Decisions locked (evaluated and chosen for the goal)
+
+Every choice below is committed; the rationale is "fastest reliable path to beating general models on hyperswitch, MVP-on-GX10 → scale-out."
+
+| # | Decision | Locked choice | Why this over the alternatives |
+|---|---|---|---|
+| 1 | **Base model** | **LOCKED: Qwen3.5-9B** (general, newest gen) as the primary GX10 target. Staging: **4B = fast iteration/proof → 9B = primary (full pipeline; full-FT CPT tight-but-feasible w/ 8-bit optimizer) → 27B dense = goal-grade, scale-out only**. MoE (35B-A3B / 122B-A10B) = compute-efficient scale-out alternatives. | Qwen3.5 has no 7B and no Coder variant; 9B is the standout small model and nearest to the "7B" target. Strongest agentic/tool-use (critical for the harness); **Rust is injected by our CPT** (built for exactly this). Fallback if CPT can't close the Rust gap = **Qwen2.5-Coder-14B** (code-specialized; *not* 7B — too small a downgrade for complex Rust). Confirmed via web (Qwen3.5-9B, dense, Apache-2.0, Mar 2026). |
+| 1b | **Harness** | **Pi** (`pi-mono`, MIT) as the agent harness for both training & eval; thin Rust/cargo tool extensions | Minimal "anti-framework" (read/write/edit/bash primitives, easy to add `cargo` tools), OpenAI-API-based (clean vLLM + token-faithful proxying), and **already a first-class Polar RL harness**. OpenHands (SkyRL-native) = heavier fallback. |
+| 2 | **RL framework** | **SkyRL** (veRL = documented fallback) | Chosen for its **modular agentic design** (reward-/tool-/task-agnostic) + proven SWE-agent recipe — *not* for OpenHands specifically. **Integration risk (R-int):** SkyRL natively integrates OpenHands, **not Pi**; driving a Pi harness via a Polar-style API proxy is real glue we must build and validate in M0. If that glue is heavy, either use OpenHands (SkyRL-native) or veRL. |
+| 3 | **CPT method** | **Full FT** of Qwen3.5-9B on GX10 **via 8-bit paged AdamW + gradient checkpointing** (~8 B/param ≈ 72GB + activations, tight); **rsLoRA r=256** fallback if OOM. (4B full-FT is comfortable for fast iteration.) | CPT is knowledge injection — low-rank LoRA underfits. Plain bf16 AdamW (16 B/param) only fits ~4–6B, so 9B full-FT **requires** the 8-bit optimizer; if it OOMs in practice, drop to rsLoRA r=256 (~85–95% recovery). |
+| 4 | **SFT method** | **LoRA r=32–64** (QLoRA ok), all linear layers | Behavior shaping is low-rank; LoRA ≈ full FT here, far cheaper. |
+| 5 | **RL method** | **LoRA r=32–64**, low LR (~3e-6) | Stable with LoRA; code wants a bit more rank than alignment's r=8. |
+| 6 | **Embeddings/lm_head** | **Frozen** — reuse Qwen3.5 native chat/tool tokens (no new vocab) | Training them buys ~2–3% for 20–30% more memory + more forgetting. |
+| 7 | **RL algorithm** | **DAPO** (plain GRPO only for bring-up) | Fixes GRPO's gradient-starvation + entropy-collapse on binary test rewards. |
+| 8 | **Reward** | **Tiered verifiable** (tests→dense→compile→lint) + **execution-free fallback** for unbuildable tasks | Execution-grounded → resists hacking; tiering keeps cost sane on heavy Rust builds. |
+| 9 | **CPT/SFT trainer** | **Axolotl** (+ Unsloth on GX10) | Scales QLoRA→full-FT and single→multi-node with config changes only. |
+| 10 | **Adapters between stages** | **Stack, don't repeatedly merge**; vLLM hot-swaps | Repeated merges interfere (10–20% loss). |
+| 11 | **Inference engine** | **vLLM** everywhere (eval, data-gen, RL rollouts) | Prefix caching + continuous batching + n-sampling + weight-sync for on-policy RL. |
+| 12 | **Training cadence** | **ReST/rejection-sampling SFT to bootstrap → semi-online DAPO → flywheel** | Cheap+stable to start, sample-efficient online once warm, compounding thereafter. |
+| 13 | **Precision on GX10** | **NVFP4 for inference/rollouts NOW** (mature in vLLM ≥0.13 on Blackwell — the real near-term win, speeds the RL bottleneck). **Training stays bf16 (full-FT) / NF4-QLoRA** for now; **NVFP4 *training*/QAT is prototype** (TransformerEngine/ModelOpt; not in Axolotl/Unsloth yet) → adopt only when stable, fallback = INT8/NF4 QAT (TorchAO). | GB10 is Blackwell — NVFP4 is its native format (the ~1 PFLOP *sparse* FP4 figure). 2–3× over FP8, accuracy ≈ bf16 *with* the recipe. Caveat: NVFP4 ≠ NF4 — HW-accelerated training needs NVIDIA's stack, not bitsandbytes; so NVFP4's near-term value is **rollout/inference speed, not training**. |
+
+### GX10 memory/precision envelope (≈120GB usable)
+
+Figures assume **gradient checkpointing on**, micro-batch 1.
+
+| Use | bytes/param | Practical ceiling | Notes |
+|---|---|---|---|
+| Inference / teacher serving | 0.5 (NVFP4) | **~70–200B** | NVFP4 makes this both fast & accurate |
+| Full FT, **bf16 AdamW** | ~16 | **~4–6B** | naive full FT |
+| Full FT, **8-bit paged AdamW** | ~8 | **~9B (tight)** | how we full-FT the 9B MVP (decision #3) |
+| **LoRA, bf16 base** (no quant) | ~2 base | **~32B comfortable, ~40–45B edge** (RL ~14–16B) | highest base fidelity, but bf16 base **forfeits NVFP4 speed** → slow >14B |
+| LoRA, FP8 base | ~1 base | ~60B (RL ~24B) | middle ground |
+| QLoRA SFT (NF4/NVFP4 base) | ~0.5 base | **~14B** comfortable, ~32B slow | NVFP4 base unlocks usable speed → pushes toward 32B |
+| QLoRA RL (DAPO) | ~0.5 + rollout copies | **~4–14B** | tightest: policy(+ref)+vLLM rollout copy+KV all resident; **NVFP4 most helps here — rollouts are the bottleneck** |
+
+**"Fits for SFT" ≠ "fits for the whole pipeline."** RL holds policy + reference + one vLLM rollout copy + KV cache at once (~2× SFT), and the flywheel multiplies that over many rollouts. **The binding constraint is RL**, so the largest *complete* pipeline (CPT+SFT+RL+flywheel) on the GX10 is **~14B**, not the 9B-headline's bigger siblings. At 32B you can run a slow SFT / reduced-quality rsLoRA CPT, but **RL + flywheel need scale-out** (and realistically RL/flywheel want scale-out from cycle 1 even at 9B — see Risk R5).
+
+**Bottom line:** NVFP4 doesn't raise the *memory* ceiling much (optimizer states stay higher-precision), but it removes the *speed* penalty for **inference/rollouts** — the real near-term win. NVFP4 *training* is still prototype (see decision #13).
+
+### Memory & throughput optimizations (GX10)
+
+**Unified-memory caveat:** the 128GB is **one coherent pool** for CPU+GPU, so classic ZeRO **CPU-offload frees ~nothing** here. The only true capacity extension beyond 128GB is **NVMe offload** — and it's bandwidth-bound (~5–7 GB/s NVMe vs ~273 GB/s memory → offloaded tensors are ~40× slower). So disk offload = "run bigger, run slower." Use it for occasional large runs, never the hot flywheel.
+
+- **Tier 1 — always on (cheap, big wins):** FlashAttention; **gradient checkpointing** (activation recompute); **8-bit + paged optimizer** (bitsandbytes — paging optimizer states avoids OOM spikes); **QLoRA frozen 4-bit/NVFP4 base** (the main lever); **stream the CPT corpus from NVMe** (mmap/`datasets` memory-map — never load it all into RAM); **NVFP4 KV-cache + prefix caching** for rollouts; **warm `target/`/sccache on fast NVMe** (the env side of disk use).
+- **Tier 2 — situational:** **ZeRO-Infinity NVMe offload** of optimizer/grad/params → enables 14–32B+ full-FT/CPT when memory is tight, but slow (NVMe-bound) — for one-off big runs, not the loop; **activation offload** to host/NVMe; **KL-free DAPO** → drop the reference-model copy entirely (saves a whole model in memory); **temporally separate RL rollout vs train** (don't hold vLLM *and* the trainer resident at once on one box — generate, free, train) unless memory allows collocation with an NVFP4 rollout copy; **offline teacher data-gen** (serve teacher in NVFP4, dump trajectories to disk, *then* train — decouples the memory peaks).
+- **Tier 3 — low value here:** generic CPU-offload (unified pool ⇒ no gain); paging weights to disk for the small MVP (unnecessary at 4B).
+
+Genuinely deferred to execution (data-driven tuning, not architecture): CPT replay ratio, LoRA rank fine-tuning, teacher-distillation licensing comfort, and build-cache aggressiveness (the main throughput risk).
+
+---
+
+## Repository layout (new — this repo is currently empty)
+
+```
+LLMDomainAdaption/
+├── README.md
+├── pyproject.toml                # deps; pinned per-stage extras
+├── configs/                      # one YAML per stage + per experiment
+│   ├── data.yaml
+│   ├── cpt.yaml                  # adapted from Phased-CPT repo config.yaml
+│   ├── sft.yaml
+│   ├── rl.yaml
+│   ├── eval.yaml
+│   └── flywheel.yaml            # outer-loop: cycle order, promotion threshold, curriculum, budget
+├── src/
+│   ├── data/                     # STAGE 1 — ingestion + dataset builders
+│   │   ├── ingest_repos.py       # clone org/repos, walk files
+│   │   ├── ingest_github.py      # PRs, issues, reviews, commit msgs via gh API
+│   │   ├── build_cpt.py          # repo-level packing + FIM → phaseN.jsonl
+│   │   ├── build_sft.py          # synthetic instructions + agent trajectories
+│   │   └── build_rl.py           # task set (issue→fix) w/ verifiable tests
+│   ├── train/
+│   │   ├── cpt.py                # Axolotl-driven CPT (curriculum adapted from Phased-CPT)
+│   │   ├── sft.py                # Axolotl SFT, LoRA (QLoRA on GX10)
+│   │   └── rl.py                 # SkyRL DAPO; drives the Pi harness, Polar-style trajectory capture
+│   ├── harness/                  # agent loop the model acts in (train + eval)
+│   │   ├── tools.py              # read/edit/run/search tool defs (shared by eval + SkyRL env)
+│   │   ├── runner.py             # observation→thought→action→feedback loop (used for eval + SFT trace gen)
+│   │   └── skyrl_env.py          # our codebase task as a skyrl-gym/skyrl-agent env
+│   ├── eval/                     # STAGE 0 — measurement, built first
+│   │   ├── internal_swebench.py  # our SWE-bench-style task runner
+│   │   ├── perplexity.py         # held-out repo perplexity
+│   │   ├── completion.py         # pass@k, cross-file completion
+│   │   └── report.py             # model-vs-baseline comparison tables
+│   └── orchestrate/              # the FLYWHEEL — outer loop tying all stages together
+│       ├── flywheel.py           # cycle driver: rollout→harvest→train→eval→promote→repeat
+│       ├── harvest.py            # rejection-sample + dedup rollouts → next-round data
+│       ├── registry.py           # checkpoint registry + best-model promotion
+│       └── curriculum.py         # difficulty scheduler (escalate as model improves)
+├── eval_sets/                    # curated HS-bench tasks — COMMITTED (public repo) for reproducibility
+│   ├── hs_knowledge/             # closed-context, convention-graded (where a tuned 9B can win)
+│   ├── hs_swe/                   # open agentic SWE (likely lose to API models; reported honestly)
+│   └── sequestered/             # final-exam split; NEVER used for promotion decisions
+├── scripts/                      # launchers (single-device + multi-node)
+└── .gitignore                    # already ignores .venv; add data/, models/, build artifacts (NOT eval_sets/)
+```
+
+---
+
+## Stage 0 — Eval harness FIRST (measurement before training)
+
+Nothing is "better" without a number. Build this before any training so every later change is quantified. **Stage 0a (harness + metrics infra) has no data dependency and comes first; Stage 0b (eval-set curation) reuses Stage 1's `ingest_github` — so in practice: 0a → Stage 1 ingest → 0b.**
+
+**The win condition, defined precisely (so it's falsifiable):** *"the tuned 9B matches or beats the API baseline on **HS-Knowledge** at a fraction of the cost/latency"* — NOT "beats on open-ended agentic SWE" (a 9B will lose that to frontier models with 1M context; we report it honestly). So HS-bench has two parts:
+- **HS-Knowledge** (the headline set): tasks engineered so *internalized* domain knowledge dominates — **closed-context** (agent gets the issue + a minimal file set, can't grep the whole repo, so recall of the right crate/trait/connector pattern must come from weights), **convention-graded** (does the patch match hyperswitch idioms / error types / conventional-commit scope), and connector-pattern recall. This is where a tuned 9B can win.
+- **HS-SWE**: standard open agentic issue→fix (issue + full repo access). Reported for honesty; we expect to trail frontier models here.
+
+**Statistical power (or the flywheel stalls in noise):**
+1. **Size the gate set to 300–500 tasks** (50–100 is too few — binomial SE ~5pp swamps the 0.5–3pp per-cycle gains). SWE-bench Verified is 500 for this reason.
+2. **Promote on a paired test (McNemar on per-task win/loss vs incumbent)**, not a difference of two independent solve-rate means — far more powerful for small gains.
+3. **State the minimum detectable effect** for the chosen n + seeds up front; if MDE > expected per-cycle gain, the gate is broken by construction.
+4. **Sequestered final-exam split** (`eval_sets/sequestered/`) never touched by promotion decisions — guards against *decision* leakage (adaptive overfitting to the held-out set across dozens of cycles), which the contamination guard does not cover.
+
+**Containerized env**: Docker image (hyperswitch docker-compose: Postgres + Redis + toolchain, MSRV 1.85) with a **warm build cache (sccache / mounted `target/`)**. Same image serves eval *and* RL rollouts. **Run in a hardened sandbox** (see Risk R7).
+
+**Metrics (`src/eval/`)**: agentic solve-rate (`internal_swebench.py`; patch applies ∧ targeted `cargo nextest` passes — via **structured nextest JSON + exit codes, never log-scraping**); held-out **perplexity** (CPT forgetting diagnostic); **completion** pass@k. **Report cost/latency per task as a first-class axis** (the local-9B selling point), not a footnote.
+
+**Baselines (`report.py`)**: same harness, prompts, and compute budget for every model = API model (Claude/GPT-class) + un-tuned base. Output: solve-rate / avg-steps / tokens / **$-and-latency** with confidence intervals.
+
+**Done when:** `eval` produces the baseline comparison table on HS-Knowledge + HS-SWE. That table is the scoreboard.
+
+---
+
+## Stage 1 — Data pipeline (code + docs + PRs + issues)
+
+Source = `juspay/hyperswitch` (config in `configs/data.yaml`). Map content to the three CPT phases:
+
+- **Phase 1 Foundation** ← Rust source of all 38 crates + `docs/` (architecture.md, CONTRIBUTING.md), `api-reference/` OpenAPI specs, READMEs. **Repo-level packing** ordered by crate dependency graph (read `Cargo.toml` workspace deps so e.g. `common_utils`→`diesel_models`→`storage_impl`→`router` appear in dependency order in-context), FIM at ~0.5 rate (PSM+SPM), 2K-token chunk overlap. Hold out ~10–20% **by crate/file** for perplexity/completion eval — never leak.
+- **Phase 2 Evolution** ← commit history / diffs, with conventional-commit messages as natural `intent → diff` pairs (how the code *changes*).
+- **Phase 3 PR Mastery** ← PRs + reviews + issues (intent → change → discussion). The **136 connectors** give many near-parallel implementations — great for teaching the connector pattern.
+
+Output: `phase{1,2,3}.jsonl` with a `training_content` field.
+
+**SFT data (`build_sft.py`):** generate instruction + **agent-trajectory** data:
+- Synthetic instructions grounded in our code (self-instruct / teacher distillation from a strong model).
+- Agentic traces: run a strong teacher model through `src/harness/` on internal tasks; keep only successful trajectories (**rejection sampling**) as `observation→thought→action→feedback` sequences.
+
+**RL data (`build_rl.py`):** task set of `issue → fix` items mined from closed hyperswitch issues whose merged PR added/changed tests. Each task = repo @ parent commit + issue text + the PR's test(s) as hidden verifier. **Bias selection toward cheap-to-verify tasks** — changes localized to one crate so we can `cargo nextest run -p <crate>` instead of building the world. Plus a stream of **synthetic connector tasks** ("implement/extend connector X") which are abundant, patterned, and unit-testable. Disjoint split from the eval set.
+
+---
+
+## Stage 2 — CPT (curriculum from Phased-CPT, stack chosen for scale)
+
+- Reuse the **design**, not necessarily the code: phased curriculum (Foundation→Evolution→PR), sequential adapter loading (anti-forgetting), LoRA targets, WandB + perplexity callback. Implement as `configs/cpt.yaml` driving either a fork of `train_phased.py` *or* Axolotl/LLaMA-Factory — pick whichever scales out with least rework (lean Axolotl, since it carries us from QLoRA→full-FT and single→multi-node cleanly).
+- **CPT is knowledge injection → favor full FT or rsLoRA high-rank, NOT low-rank QLoRA** (see Deep Technical Decisions §A). On the GX10, **Qwen3.5-9B full-FT is tight-but-feasible** with an **8-bit paged optimizer + gradient checkpointing** (~9B×10B ≈ 90GB + activations); 4B full-FT is comfortable for fast iteration. If 9B full-FT proves too tight in practice, fall back to **rsLoRA r=128–256** (`use_rslora=True`). Single-process. The reference repo's 8×GPU ZeRO-3 config is the scale-out target (→ 27B).
+- **Data mix:** internal Rust **upsampled** + ~5–10% general-code/text **replay** to prevent catastrophic forgetting; tune via held-out perplexity.
+- **MVP model:** **Qwen3.5-9B** (4B for fast iteration) so a full CPT→SFT→RL loop completes on-box.
+
+---
+
+## Stage 3 — SFT (instruction + agentic)
+
+- `src/train/sft.py` using **Axolotl** SFT, LoRA, on top of the CPT adapters.
+- Train on the rejection-sampled agent trajectories + synthetic instructions from Stage 1.
+- **Overfit guard (gates everything downstream):** monitor validation loss + held-out perplexity; if perplexity degrades >~5% vs CPT, cut LR / raise replay before RL. A weak/overfit SFT checkpoint cannot be rescued by RL.
+- **Done when:** SFT model beats CPT-only model on agentic solve-rate in `eval`.
+
+---
+
+## Stage 4 — RL on the harness (SkyRL)
+
+- **Backbone: SkyRL** (`skyrl-train` + `skyrl-agent` + `skyrl-gym`). Algorithm: **DAPO** as the working default (GRPO + clip-higher + dynamic sampling + token-level loss — fixes GRPO's gradient-starvation/entropy-collapse on binary test rewards; see Deep Technical Decisions §C). Plain GRPO for early bring-up; GSPO only if trajectories get very long.
+- **Our env (`src/harness/skyrl_env.py`):** wrap each `issue → fix` task as a skyrl-gym/skyrl-agent environment; the agent acts in the **Pi** harness via OpenAI-style tool calls over `src/harness/tools.py`. **Integration caveat (R-int):** SkyRL natively integrates OpenHands, not Pi — bridging it to Pi via a Polar-style API proxy is glue we build/validate at M0; if heavy, fall back to OpenHands or veRL.
+- **Tiered reward (designed around hyperswitch's expensive builds):** evaluate cheap→expensive and short-circuit, so most rollouts never pay for a full build:
+  1. `cargo +nightly fmt --check` + `cargo clippy` (no DB, fast) — dense shaping signal.
+  2. `cargo check -p <crate>` — compiles?
+  3. `cargo nextest run -p <crate> <targeted tests>` against the warm-cache container — the real verifiable reward. Optional small per-step penalty for efficiency.
+- **Execution-free complement (SWE-RL style):** for tasks too costly to build, add a rule-based reward = similarity of the generated patch to the gold PR patch. Lets us scale RL volume cheaply and reserve full execution for a verified subset.
+- **Why SkyRL over hand-rolled GRPO:** proven SWE-bench recipe (SA-SWE-32B 24.4%→39.4% with ~300 samples), real harness integration (OpenHands fork available to borrow tool/runtime patterns), and the **Tinker API** so the *same* RL script runs on the GX10 (FSDP/vLLM local) and scales to multi-node (Ray) with no rewrite.
+- Rollouts served by **vLLM**; 8–16 samples/task.
+- **Done when:** RL model beats SFT model on solve-rate, and ideally crosses the API baseline on our internal set.
+
+---
+
+## Deep technical decisions (per stage) — the "how", with good/bad
+
+These are the settled engineering choices and *why*. Citations are in the planning research; the headline tradeoffs are below.
+
+### A. LoRA vs full fine-tuning vs high-rank — **decided per stage, because the stages differ in kind**
+
+The key insight: **CPT injects new knowledge; SFT/RL shape behavior.** LoRA is great at the latter, weak at the former ("LoRA Learns Less and Forgets Less" — low-rank underfits knowledge injection but forgets less). So:
+
+| Stage | Choice | Rank/target | Why / tradeoff |
+|---|---|---|---|
+| **CPT** | **Full FT** of the small MVP model (a ~4B fits the GX10's 128GB unified for full FT incl. Adam states); **else rsLoRA high-rank (r=128–256, `use_rslora=True`)** | all linear layers (q/k/v/o + gate/up/down) | Standard low-rank LoRA (r=8–32) **underfits domain knowledge** — bad for CPT. **Do NOT use QLoRA for CPT** (4-bit + knowledge injection compounds the deficit). rsLoRA recovers ~85–95% of full-FT at lower cost; full FT is best when it fits. |
+| **SFT** | **LoRA / QLoRA** | r=32–64, all linear | Instruction/agentic behavior is low-rank — LoRA ≈ full FT here (<5–10% gap), QLoRA shows ~no code-quality loss. Cheap and safe. |
+| **RL** | **LoRA** | r=32–64 (code needs more than the r=8 typical of alignment), lower LR | RL is stable with LoRA; code RL benefits from a bit more rank. Full FT only if a measurable gap appears. |
+
+**Adapter handling between stages:** prefer **stacking / not merging repeatedly** (repeated merges cause interference, ~10–20% loss in bad cases); vLLM hot-swaps adapters at inference. Merge only when inference simplicity demands it, with lower LR + warmup.
+
+**Catastrophic-forgetting control (cheap and effective):** **data replay** beats fancy regularizers — ~5–10% general-code/text replay in CPT, ~20–30% general instructions in SFT; RL needs none if SFT wasn't overfit. (Note: a weak/overfit SFT checkpoint cannot be fully rescued by RL — SFT quality gates everything downstream.)
+
+### B. Do we train `lm_head` / `embed_tokens`? — **default NO; YES only if we add tokens**
+
+- Qwen ties `embed_tokens`↔`lm_head`. With an **unchanged vocab**, freeze both: training them buys ~2–3% but costs 20–30% more memory and risks more drift/forgetting — not worth it.
+- **If we add special tokens** (custom tool/role markers for the harness), we **must** train the new rows of both. **Mean-init** new-token embeddings (mean of existing rows) — random init is catastrophic — train via PEFT `modules_to_save=["embed_tokens","lm_head"]` with `ensure_weight_tying=True` and a lower LR.
+- **Decision:** prefer **reusing Qwen3.5's existing chat/function-calling tokens** so we *don't* add vocab and keep embeddings frozen. Only add tokens if the harness format truly can't be expressed in the native template.
+
+### C. RL policy optimization — **GRPO baseline, DAPO as the working default**
+
+SkyRL supports GRPO/PPO/DAPO. Plain GRPO has two real failure modes on **binary** test rewards: **gradient starvation** (when all G samples in a group pass or all fail, advantage variance = 0 → no gradient; can waste >50% of rollouts) and **entropy collapse**. **DAPO** fixes both and is our default:
+- **Clip-higher** (asymmetric clip) → prevents entropy collapse.
+- **Dynamic sampling** → drop zero-variance (all-pass/all-fail) groups, keep only informative ones.
+- **Token-level loss** → removes length bias.
+- **Soft overlong penalty** → don't punish genuine correctness as a truncation artifact.
+- Group size **G≈8**, batch ~256–512 prompts; for binary rewards **mean-center advantages (skip std-division)** — standard variance-free normalization — and consider the **sign-advantage `A=2r−1`** to avoid gradient starvation (arXiv 2605.07689); RL **LR ~3e-6 (LoRA)** — much lower than SFT.
+- **KL term:** DAPO can run **KL-free** (drop the reference-model copy → saves a whole model in memory; clip-higher prevents collapse without it). Keep a small KL (β≈0.02) only if we see drift/forgetting.
+- **GSPO** = Group *Sequence* Policy Optimization (sequence-level importance ratios, more stable on very long trajectories / MoE). Escalate to it only if trajectories get very long (>~20–30k tokens); otherwise stay on DAPO.
+
+### D. Reward signals — **tiered, verifiable, hard to hack**
+
+Outcome reward is primary; cheap signals shape; nothing is a learned proxy (all execution-grounded → resists reward hacking):
+```
+R = 1.0·R_tests   +  0.3·R_dense        +  0.1·R_compile  +  0.05·R_fmt/clippy
+    (FAIL→PASS &       (fraction of           (cargo check)     (deterministic
+     PASS→PASS ok)      tests passing)                            style/lint)
+```
+- **RLVR** (verifiable rewards) via the test harness is the anchor. Dense partial-credit gives signal on near-misses.
+- **Anti-hacking:** never expose hidden test source in observations; token-level loss for length bias; soft overlong; format/lint inside `R_compile` so it can't game formatting.
+- **Execution-free complement (SWE-RL / SWE-RM):** for tasks too costly to build, a patch-similarity-to-gold or a trained trajectory verifier gives reward without compiling — lets us scale RL volume; reserve full execution for a verified subset.
+
+### E. Multi-turn credit & token-faithfulness (the Polar point, concretely)
+
+- **Loss-mask everything the model didn't generate** — tool outputs, test logs, compiler errors, system/user turns. In our agent traces only ~20% of tokens are model-generated; without masking, 80% of the gradient is noise and the model learns to game tool I/O.
+- **Token-faithful trajectories:** train on the *exact sampled token IDs/log-probs* from rollout (don't re-encode text) so loss masks and advantages align — SkyRL-Agent handles this; it's the implementation of the Polar idea.
+- **Turn-level advantage** (credit per tool-call/step) beats one trajectory-level scalar smeared over 100 turns — a bad call at turn 3 shouldn't get the same credit as 50 good later actions.
+
+### F. Dataset construction — concrete recipes per stage
+
+- **CPT:** dependency-**topologically** ordered file packing with `// File: path` markers; **document-masked packing** (no cross-file attention bleed); **FIM ~50%** (PSM+SPM sentinels), ideally **AST-structure-aware** spans for Rust (parse with `syn`); **MinHash/LSH near-dedup** (Jaccard ~0.7); **decontaminate against HS-bench**; **upsample Rust** + 5–10% general replay; 2–4 effective epochs (diminishing returns after ~4), higher weight decay if data-limited.
+- **SFT:** strict **chat template + assistant-only loss mask**; instructions grounded in hyperswitch via **OSS-Instruct / Evol-Instruct** (seed from real crate snippets) + teacher distillation; **agentic trajectories** collected SWE-Gym-style and **rejection-sampled** to successes only (expect 70–90% rejected). **Quality ≫ quantity** — a few hundred excellent multi-turn trajectories move the needle (LIMA/SWE-Gym evidence).
+- **RL tasks:** SWE-bench-style **FAIL_TO_PASS + PASS_TO_PASS** verifier per task; **curriculum** that keeps tasks in the model's ~20–80% solve band (drop 0% and 100% — both give zero GRPO signal); strict train/eval **decontamination**; synthetic **connector tasks** to pad volume.
+
+---
+
+## The Flywheel — continuous self-improving loop (the heart of the project)
+
+### Cold-start (cycle −1) — igniting the flywheel (CRITICAL: a flywheel that starts at 0% stays at 0%)
+
+A CPT'd-only 9B dropped onto real hyperswitch issues will plausibly solve ~0–2%. Rejection-sampling at 0% harvests nothing, and the DAPO curriculum *drops* 0%-solve tasks — so at cold start **every real task gets dropped and nothing trains.** We must lift solve-rate above ~10% *before* online RL:
+- **Synthetic-easy ladder first:** start on generated trivial tasks with known gold + `cargo check`-only verification (rename a field, add a `derive`, fix an obvious type error, fill a `todo!()`). These teach harness *mechanics* (read→edit→run→read-error→edit) with immediate reward variance, decoupled from domain difficulty.
+- **SFT-on-gold for unsolvable tasks:** for tasks the student can't touch yet, distill the *teacher's* (or the gold PR's) trajectory as plain SFT — don't require self-solving. Only move a task into the "must self-solve, 20–80% band" RL pool once the student crosses a threshold on it (**two-mode curriculum** — this resolves the conflict between "drop 0%-solve" and cold-start).
+- **Execution-free reward is the cold-start *primary*, not a complement:** at ~0% pass, patch-similarity-to-gold (SWE-RL) is the only dense signal; lead with it, add test-execution reward as the model climbs.
+- **Go/no-go:** if post-bootstrap solve-rate on the trivial tier is still <5%, **stop and fix harness/curriculum** before spending RL compute.
+
+### The loop (cycle 0+)
+
+Since training time is unconstrained, the real engine is an **outer loop** (`src/orchestrate/flywheel.py`, config `configs/flywheel.yaml`) that runs the stages repeatedly. `CPT→SFT→RL` is **cycle 0** that seeds the loop. Each subsequent cycle:
+
+1. **Rollout (generate):** the current **best** checkpoint attempts a large batch of tasks in the harness — many samples per task (high temperature, lots of rollouts). This is where "lots of rollouts" pays off.
+2. **Verify + harvest (`harvest.py`):** score every trajectory with the tiered reward (`fmt`/`clippy`→`check`→`nextest`). Keep only **successful, verified** trajectories; **dedup** (by task + patch fingerprint) and filter for diversity to avoid mode collapse. These become fresh **SFT** data (the winning traces) and fresh **RL** data (the tasks, now with known-good solutions).
+3. **Train:** continue SFT on the growing harvested-trajectory set and/or run another RL round (GRPO) on the task pool, starting from the current best checkpoint.
+4. **Eval (`report.py`):** run the new checkpoint on the **frozen, held-out HS-bench**.
+5. **Promote (`registry.py`):** if it beats the incumbent by a margin, it becomes the new "best" and seeds the next cycle's rollouts. If not, keep the incumbent and change something (more data, harder/easier curriculum, hyperparams).
+6. **Escalate (`curriculum.py`):** as solve-rate climbs, shift the task mix toward harder problems (multi-crate changes, cross-file, trickier connectors), so the model is always training near the edge of its ability.
+
+This is the **ReST / STaR / iterative-rejection-sampling** pattern: the model generates its own next-round training data, verified by tests, and bootstraps upward. It's exactly why beating general models becomes feasible — we accumulate a large, *verified, in-domain* trajectory corpus no general model has.
+
+**Guardrails (critical):**
+- **No contamination, ever:** HS-bench held-out tasks (and their repos/commits) are *never* harvested into training. `harvest.py` asserts disjointness every cycle.
+- **Promotion gate:** checkpoints advance only on held-out improvement beyond noise (mean ± std over 3–5 seeds), preventing reward-hacking/overfit from compounding.
+- **Diversity floor:** dedup + sampling so the trajectory corpus doesn't collapse onto a few easy task types.
+- **Per-cycle ledger:** every cycle appends a row to a learning-curve log (cycle #, dataset size, solve-rate, vs-baseline delta) — the project's progress is literally this curve trending up.
+
+**Stopping:** there is no fixed end — run until the held-out learning curve plateaus, then escalate difficulty / model size / scale-out. The loop also runs unattended on the scale-out cluster.
+
+---
+
+## Scale-out path (after MVP proves the pipeline)
+
+- CPT/SFT: QLoRA→LoRA/full-FT, single→multi-node via Axolotl (or the reference repo's ZeRO-3 config); bump to a 32B-class base.
+- RL: SkyRL's **Tinker API + Ray** scales the *same* env/script to distributed rollouts and bigger models — this is SkyRL's core design point, so no architectural change.
+- Same `configs/`, same `eval` — only `scripts/` launchers and resource settings change.
+
+---
+
+## Inference layer (vLLM) — where and how it's used
+
+vLLM is the single generation engine behind every step that needs model outputs. Why it matters here: agent rollouts re-send a **huge shared prefix** (system prompt + tool specs + repo/file context) every turn, and RL needs **many samples per task** — exactly what vLLM is built for.
+
+- **Stage 0 eval:** serve each model (candidate + baselines) behind an OpenAI-compatible endpoint; the harness drives multi-turn tool calls against it. **Prefix caching** makes the repeated context cheap; **continuous batching** runs many HS-bench tasks concurrently.
+- **SFT data gen:** serve the **teacher** model to synthesize instructions/trajectories, and serve the **current** model for rejection-sampling rollouts (high temperature, `n=k` samples/prompt in one call). LoRA adapters are **hot-loaded** (no merge) so we can sample from any checkpoint.
+- **RL rollouts (the heavy user):** SkyRL uses vLLM as the rollout engine — for each task it samples **G≈8** trajectories. vLLM and the trainer are **collocated on the same Ray cluster**; after each optimization step SkyRL **syncs updated policy weights into the vLLM workers** (weight-update API) so rollouts stay on-policy. This sync + KV-cache reuse is the throughput bottleneck we tune.
+- **Flywheel "many rollouts":** the same vLLM serving path, run at scale and high temperature to harvest verified trajectories.
+- **GX10 → scale-out:** one vLLM instance on the GX10 for the MVP; multiple Ray-scheduled vLLM workers (`VLLM_BUNDLE_INDICES`) at scale — same code path.
+
+Knobs we rely on: **prefix caching** (shared agent context), **continuous batching** (throughput), **`n`-sampling** (G samples/prompt for GRPO/DAPO), **LoRA hot-swap** (serve adapters without merging), **token/log-prob output** (needed for token-faithful trajectories), and **chunked prefill** (long Rust file contexts).
+
+---
+
+## Tooling (settled defaults)
+
+- **CPT/SFT:** Axolotl (scales QLoRA→full-FT, single→multi-node) + PEFT + Unsloth (GX10 efficiency). Reference repo kept as design source / fallback.
+- **RL + agentic:** **SkyRL** (`skyrl-train`/`skyrl-agent`/`skyrl-gym`, Tinker API, Ray). Chosen over **veRL** because the task is long-horizon multi-turn agentic coding: SkyRL's agentic layer + OpenHands harness integration + ready SWE-agent recipe mean less glue code. **Tradeoff:** veRL is more mature/performant with a bigger community — it's the explicit **fallback** if SkyRL (v0) hits throughput/stability walls. Decision is largely reversible: reward fn, `harness/tools.py`, and the task set are framework-agnostic; only the thin env adapter + launcher change.
+- **Inference/rollouts:** vLLM.
+- **Harness:** **Pi** (`pi-mono`, MIT — read/write/edit/bash + our `cargo` tool extensions), used identically for training rollouts and eval. Trajectories captured **Polar-style** (proxy the OpenAI-compatible API → token-faithful traces), keeping the harness a black box and the trainer (SkyRL/veRL) swappable. OpenHands (SkyRL-native, container-based) is the heavier fallback.
+- **Tracking:** WandB.
+- **GitHub ingest:** `gh` CLI / GitHub API.
+
+---
+
+## Verification (end-to-end)
+
+1. `eval` runs and produces a baseline table (Stage 0) — **before** any training.
+2. Data builders produce non-empty, schema-valid `phase*.jsonl` / SFT / RL splits with **no train/eval leakage** (assert disjoint file/commit sets).
+3. Each training stage produces a checkpoint that **monotonically improves** the headline metric (agentic solve-rate) over the previous stage on the same `eval` set — this is the core success signal.
+4. **Flywheel health**: each cycle appends to the learning-curve ledger; the held-out solve-rate trends up across cycles, with the contamination assertion passing every cycle. A flat or declining curve triggers a curriculum/hyperparam change, not blind continuation.
+5. Final: the tuned model **beats the un-tuned base** decisively and **matches/beats the API baseline on HS-Knowledge at a fraction of cost/latency** (the precise win condition; HS-SWE reported honestly). The deliverable is that delta **plus the rising multi-cycle learning curve** showing the flywheel compounds.
+
+---
+
+## Tunable during execution (architecture is locked; these are knobs, see Decisions Locked)
+
+- CPT replay ratio (tune via held-out perplexity; Rust is under-represented in public corpora, so may need more general Rust).
+- LoRA rank fine-tuning for SFT/RL within the 32–64 band.
+- Teacher-distillation volume / licensing comfort for synthetic SFT data.
+- **Build-cache aggressiveness** (`target/` + sccache warm-up) — the main throughput risk; tune for acceptable RL rollout speed.
+- Confirm at first download whether a code-specialized **Qwen3.5-Coder** variant exists; prefer it, else general Qwen3.5 + CPT closes the Rust gap.
+
+---
+
+## Milestones & go/no-go gates (front-load measurement before burning CPT compute)
+
+The audit's core finding: the real bottleneck is **data supply + Rust build throughput + eval power**, not modeling — yet those were deferred. So we gate on them *first*. Each gate has a numeric pass criterion and a defined fallback.
+
+- **M0 — Foundations + verify assumptions.** Stand up Stage-0a eval harness; produce the baseline table; **validate the SkyRL↔Pi↔Polar-proxy integration** (Risk R-int); confirm NVFP4 inference works in vLLM on the GX10. **Verify the load-bearing external facts** (see below). → *Gate: harness drives Pi end-to-end + baseline table exists. Fallback: OpenHands harness / veRL.*
+- **M1 — Task-supply census + throughput measurement (HARD GATE).** Actually run the miner over closed hyperswitch PRs; **count reproducible single-crate FAIL_TO_PASS tasks**; measure median verified-rollout latency, builds/hour at max container concurrency, GPU-idle %. → *Gate: ≥~150 usable verifiable tasks AND a throughput budget that makes a cycle feasible. If <150, re-scope RL around synthetic + execution-free reward (and adjust the headline claim). If GPU-idle >~60%, provision separate CPU build workers.*
+- **M2 — Cold-start clears the floor.** Run the cold-start bootstrap (synthetic-easy ladder + SFT-on-gold). → *Gate: solve-rate on the trivial tier ≥5–10%. If not, fix harness/curriculum — do NOT start RL.*
+- **M3 — One full CPT→SFT→RL cycle beats baseline beyond noise (SCALE-OUT decision).** → *Gate: paired-test improvement on HS-Knowledge. Pass → commit to scale-out for the flywheel proper. Fail → diagnose (data? eval power? reward hacking?) before more compute.*
+
+## Risk register (highest-impact first, from adversarial audit)
+
+| ID | Risk | Mitigation (added to plan) |
+|---|---|---|
+| **R1** | **Flywheel cold-start at ~0% → never ignites.** | Cold-start section: synthetic-easy ladder, SFT-on-gold, execution-free reward as primary, two-mode curriculum, <5% go/no-go. |
+| **R2** | **"Beats general models" unfalsifiable/false** if HS-bench is generic SWE (frontier models win via 1M context). | Split eval: **HS-Knowledge** (closed-context, convention-graded — winnable) is the headline; HS-SWE reported honestly. Success redefined: match/beat API baseline on HS-Knowledge at fraction of cost/latency. |
+| **R3** | **50–100 eval tasks too underpowered** → promotion gate stalls in noise; decision-leakage overfit. | Gate set 300–500; **paired McNemar** test; stated MDE; **sequestered final-exam** split. |
+| **R4** | **Verifiable-task supply likely 10–50×, not hundreds**; synthetic connectors over-loaded; historical-env reproduction is person-months. | M1 supply census as hard gate; **scope the connector-task generator as an explicit deliverable**; diversity quota (max % connectors/batch); prefer **injecting bugs into one pinned base commit** over reconstructing N historical envs. |
+| **R5** | **Full RL flywheel won't make wall-clock progress on one GX10** (~1hr build wall-clock/RL step; vLLM+trainer can't co-reside). | Reframe: **GX10 = correctness MVP + cold-start SFT; flywheel proper needs scale-out from cycle 1.** Separate CPU build farm from the GPU box; instrument throughput at M1. |
+| **R6** | **Build-cache invalidation** across commits / low-crate edits silently kills throughput. | Pin to few base commits; bias task selection to **leaf crates**; per-rollout build-time budget → fall back to execution-free reward on overrun. |
+| **R7** | **Executing model-generated code** (Pi has `bash`) — exfiltration, escape, tampering, secret leakage (public trajectories). | **gVisor/Firecracker** sandbox (not vanilla Docker), **egress lockdown** by default, per-rollout CPU/mem/PID/time limits, no-secrets base image, **read-only/write-protected hidden tests**, fresh verifier container. |
+| **R9** | **SFT teacher hand-waved** but caps the whole ceiling; publishing teacher outputs has licensing/ToS issues. | Name teacher candidate(s); estimate $/kept-trajectory at expected rejection rate; **resolve output-licensing before generating** (public repo publishes trajectories). |
+| **R10** | **Checkpoint = a tuple** (full-FT base + SFT LoRA + RL LoRA, not merged) — versioning/rollback undesigned. | `registry.py` records base hash + adapter stack + **training-data manifest hash** + eval result, so any cycle is reproducible/reversible. |
+| **R11** | **Reward-hacking via filesystem/tooling** (edit Cargo features, `#[ignore]`, weaken asserts, `git checkout` gold, fake stdout). | Verify via **structured nextest JSON + exit codes**; snapshot-diff protected paths → zero-reward any rollout that mutated tests/manifest; verifier runs in a fresh container the agent never had write access to. |
+
+## Assumptions to verify before M0 (load-bearing external facts; each has a named fallback)
+
+| Assumption | If wrong → fallback / trigger |
+|---|---|
+| Qwen3.5-9B exists, dense, strong tool-use, Apache-2.0 | → Qwen2.5-Coder-14B |
+| Pi (`pi-mono`) is a first-class Polar harness & API-proxyable | → OpenHands (SkyRL-native) |
+| SkyRL drives an arbitrary OpenAI-API harness with light glue | → veRL, or OpenHands path |
+| NVFP4 inference works in vLLM on GB10 today | → FP8/bf16 rollouts (slower) |
+| GB10 ≈128GB unified, ~273 GB/s, ~1 PFLOP sparse FP4 | → re-derive the memory/throughput envelope |
+| SkyRL Tinker API gives single→multi-node with no rewrite | → accept a separate scale-out launcher |

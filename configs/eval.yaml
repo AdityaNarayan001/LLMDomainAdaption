@@ -1,0 +1,30 @@
+# Stage 0 — Eval harness. The scoreboard. Built before training.
+suites:
+  hs_knowledge:                   # headline set — domain knowledge dominates (winnable)
+    path: "eval_sets/hs_knowledge"
+    closed_context: true          # agent gets issue + minimal file set, cannot grep whole repo
+    convention_graded: true       # patch must match hyperswitch idioms / error types / commit scope
+    size_target: 350              # 300-500 for statistical power (Risk R3)
+  hs_swe:                         # open agentic SWE — reported honestly (expect to trail frontier)
+    path: "eval_sets/hs_swe"
+    closed_context: false
+    size_target: 150
+  sequestered:                    # final-exam; NEVER used for promotion decisions (decision leakage)
+    path: "eval_sets/sequestered"
+    size_target: 100
+
+metrics:
+  seeds: 5
+  solve_rate: true                # patch applies AND structured nextest JSON shows FAIL->PASS & PASS->PASS
+  perplexity: true                # CPT forgetting diagnostic
+  completion_pass_k: [1, 5]
+  report_cost_latency: true       # first-class axis — the local-9B selling point
+
+gate:                             # promotion gate
+  test: "mcnemar"                 # paired per-task win/loss vs incumbent (powerful for small gains)
+  alpha: 0.05
+  min_detectable_effect_pp: 2.0   # if MDE > expected per-cycle gain, gate is broken by construction
+
+baselines:
+  - { name: "api_frontier", kind: "api" }      # Claude/GPT-class
+  - { name: "base_untuned", kind: "local", model: "Qwen/Qwen3.5-9B" }

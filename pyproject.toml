@@ -1,0 +1,63 @@
+[project]
+name = "llm-domain-adaption"
+version = "0.0.1"
+description = "Domain-adapted agentic coding LLM for the juspay/hyperswitch Rust codebase (CPT -> SFT -> RL flywheel)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+
+# Core deps that are light enough to install anywhere (data pipeline, eval harness, orchestration).
+# Heavy training/inference stacks are optional extras so the data/eval/M1 work can run without GPUs.
+dependencies = [
+    "pyyaml>=6.0",
+    "pydantic>=2.6",
+    "requests>=2.31",
+    "datasets>=2.19",
+    "tqdm>=4.66",
+    "rich>=13.7",
+    "datasketch>=1.6",      # MinHash/LSH near-dedup for CPT corpus
+    "scipy>=1.11",          # McNemar / power analysis for the eval gate
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+# Training stack (GX10 / scale-out). Installed on the training box only.
+train = [
+    "torch>=2.4",
+    "transformers>=4.44",
+    "peft>=0.12",
+    "accelerate>=0.33",
+    "bitsandbytes>=0.43",   # 8-bit paged optimizer + NF4 QLoRA fallback
+    "axolotl>=0.6",         # CPT/SFT trainer
+    "wandb>=0.17",
+]
+# Inference / rollouts.
+serve = [
+    "vllm>=0.13",           # NVFP4 inference on Blackwell
+]
+# RL backbone.
+rl = [
+    "skyrl",                # NovaSky SkyRL (skyrl-train / skyrl-agent / skyrl-gym)
+    "ray>=2.30",
+]
+# Optional: AST-aware FIM + snippet extraction (refinement, not critical path).
+ast = [
+    "tree-sitter>=0.23",
+    "tree-sitter-rust>=0.23",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

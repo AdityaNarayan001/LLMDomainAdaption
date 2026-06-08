@@ -1,0 +1,44 @@
+# Stage 2 — Continued Pre-Training. Knowledge injection -> full FT (8-bit paged AdamW) on the 9B.
+base_model: "Qwen/Qwen3.5-9B"     # 4B for fast iteration: "Qwen/Qwen3.5-4B"
+trainer: "axolotl"
+
+method:
+  full_ft: true                   # decision #3; rsLoRA fallback below if OOM
+  optimizer: "paged_adamw_8bit"   # ~8 B/param -> 9B fits 128GB unified (tight)
+  gradient_checkpointing: true
+  rslora_fallback:                # used only if full FT OOMs
+    enabled: false
+    r: 256
+    alpha: 512
+    use_rslora: true
+    target_modules: ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]
+
+embeddings:
+  train_embed_tokens: false       # decision #6 — frozen, reuse native Qwen tokens
+  train_lm_head: false
+
+curriculum:                       # design adapted from Phased-CPT
+  phases:
+    - { name: foundation, data: "data/datasets/cpt_phase1.jsonl", epochs: 3 }
+    - { name: evolution,  data: "data/datasets/cpt_phase2.jsonl", epochs: 2 }
+    - { name: pr_mastery, data: "data/datasets/cpt_phase3.jsonl", epochs: 2 }
+  load_previous_adapter: true     # anti-forgetting
+
+hyperparams:
+  lr: 2.0e-5
+  lr_schedule: "cosine"
+  warmup_ratio: 0.05
+  micro_batch_size: 1
+  gradient_accumulation: 16
+  max_seq_len: 16384
+  bf16: true                      # NVFP4 training is prototype; train in bf16 (decision #13)
+  weight_decay: 0.1
+
+eval:
+  perplexity_every_steps: 200     # forgetting / collapse early-warning
+
+tracking:
+  wandb: false                    # OPTIONAL. false -> report_to=none; our src/metrics.py
+                                  # JSONL is the source of truth. Set true + `wandb login`
+                                  # (key from wandb.ai/authorize) only for hosted dashboards.
+  wandb_project: "hs-cpt"

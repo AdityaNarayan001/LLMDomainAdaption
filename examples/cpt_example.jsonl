@@ -1,0 +1,7 @@
+{
+  "training_content": "<|fim_prefix|>// File: crates/router/src/refunds.rs\npub fn refund(req: RefundRequest) -> Resu<|fim_suffix|>unt)?;\n    Ok(RefundResponse { id: req.id, amount, status: Status::Pending })\n}\n<|fim_middle|>lt<RefundResponse, Error> {\n    let amount = req.amount.ok_or(Error::MissingAmo",
+  "meta": {
+    "path": "crates/router/src/refunds.rs",
+    "phase": "foundation"
+  }
+}

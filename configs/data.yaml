@@ -1,0 +1,32 @@
+# Data pipeline config — Stage 1. Source = juspay/hyperswitch.
+source:
+  repo: "juspay/hyperswitch"
+  clone_url: "https://github.com/juspay/hyperswitch.git"
+  default_branch: "main"
+  # Pin a base commit so the warm build cache serves many tasks (Risk R6).
+  base_commit: null            # filled in at M1 after the supply census picks a base
+
+paths:
+  raw_repo: "data/hyperswitch"
+  out_dir: "data/datasets"
+
+cpt:
+  # Phase 1 Foundation: source + docs + openapi. Phase 2 Evolution: commit diffs.
+  # Phase 3 PR Mastery: PRs + reviews + issues.
+  include_globs: ["crates/**/*.rs", "docs/**/*.md", "api-reference/**/*.yml", "**/README.md"]
+  exclude_globs: ["target/**", "**/*_generated.rs", "tests/fixtures/**"]
+  dependency_ordered: true     # topological order from Cargo.toml workspace deps
+  file_marker: "// File: {path}\n"
+  fim_rate: 0.5                # PSM+SPM
+  chunk_overlap_tokens: 2048
+  dedup_jaccard: 0.70          # MinHash/LSH near-dedup
+  rust_upsample: 1.0
+  general_replay_frac: 0.08    # 5-10% general code/text to fight forgetting
+  heldout_frac: 0.15           # split BY crate/file; decontaminate vs HS-bench
+
+github:
+  # gh CLI / REST. Used by both Stage 1 (RL tasks) and Stage 0b (eval set).
+  per_page: 100
+  states: ["closed"]
+  require_linked_pr: true
+  require_tests_changed: true

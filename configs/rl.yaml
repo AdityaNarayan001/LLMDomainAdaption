@@ -1,0 +1,42 @@
+# Stage 4 — RL on the Pi harness via SkyRL. DAPO over verifiable test rewards.
+base: "sft"                       # start from SFT checkpoint
+framework: "skyrl"                # veRL = fallback (Risk R-int)
+harness: "pi"                     # pi-mono; bridged via Polar-style API proxy
+
+algorithm:
+  name: "dapo"                    # GRPO + clip-higher + dynamic sampling + token-level loss
+  group_size: 8                   # G
+  prompts_per_batch: 384          # 256-512
+  clip_low: 0.2
+  clip_high: 0.28                 # asymmetric (clip-higher) -> avoid entropy collapse
+  dynamic_sampling: true          # drop zero-variance (all-pass/all-fail) groups
+  token_level_loss: true
+  soft_overlong_penalty: true
+  advantage: "mean_center"        # variance-free; sign-advantage (A=2r-1) optional for binary
+  kl_free: true                   # drop reference model -> saves a whole model on GX10
+  kl_beta: 0.0                    # set ~0.02 only if drift/forgetting observed
+  lr: 3.0e-6                      # much lower than SFT
+
+policy_lora:
+  r: 48
+  alpha: 96
+  target_modules: ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]
+
+rollout:
+  engine: "vllm"
+  samples_per_task: 8
+  temperature: 1.0
+  max_turns: 40
+  max_tokens: 16384
+  weight_sync: "adapter_hotload"  # sync updated LoRA into vLLM workers each step
+
+reward:
+  # tiered, short-circuiting cheap->expensive (see harness/reward.py)
+  weights: { tests: 1.0, dense: 0.3, compile: 0.1, fmt_clippy: 0.05 }
+  execution_free_fallback: true   # SWE-RL patch-similarity for unbuildable / cold-start
+  per_rollout_build_budget_s: 240 # over budget -> execution-free reward (Risk R6)
+
+curriculum:
+  solve_band: [0.2, 0.8]          # drop 0% and 100% (zero GRPO signal)
+  two_mode: true                  # cold-start: SFT-on-gold for <band tasks (Risk R1)
+  diversity_max_connector_frac: 0.4  # cap connector tasks per batch (Risk R4)

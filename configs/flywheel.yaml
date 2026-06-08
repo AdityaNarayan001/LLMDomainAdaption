@@ -1,0 +1,28 @@
+# The flywheel — outer loop tying the stages together.
+cold_start:                       # cycle -1: ignite above ~10% solve (Risk R1)
+  synthetic_easy_ladder: true     # generated trivial tasks, cargo-check-only verify
+  sft_on_gold_for_unsolvable: true
+  execution_free_primary: true    # patch-similarity is the primary signal at ~0% pass
+  go_no_go_min_solve: 0.05        # if trivial-tier solve < 5% -> stop, fix harness/curriculum
+
+cycle:
+  rollout_tasks_per_cycle: 500
+  samples_per_task: 8             # high temperature
+  train: ["sft", "rl"]            # SFT on harvested winners + DAPO round; RL leads once warm
+  promote_on: "hs_knowledge"      # gate suite (see eval.yaml)
+  escalate_difficulty: true
+
+harvest:
+  keep: "verified_success_only"   # rejection sampling
+  dedup_by: ["task_id", "patch_fingerprint"]
+  diversity_floor: true
+
+registry:
+  # a checkpoint is a TUPLE: base hash + adapter stack + data-manifest hash + eval result (Risk R10)
+  track_lineage: true
+  rollback_on_regression: true
+
+stopping:
+  plateau_patience_cycles: 5      # flat learning curve -> change curriculum/hyperparams, then escalate
+
+ledger: "runs/learning_curve.jsonl"

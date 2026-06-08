@@ -1,0 +1,33 @@
+# Stage 3 — SFT (instruction + agentic). Behavior shaping -> LoRA on top of CPT.
+base: "cpt"                       # start from the CPT checkpoint (stacked, not merged)
+trainer: "axolotl"
+
+method:
+  lora:
+    r: 48                         # 32-64 band
+    alpha: 96
+    dropout: 0.05
+    target_modules: ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]
+  qlora: false                    # bf16 base on GX10 for fidelity; NF4 fallback if memory tight
+
+data:
+  instructions: "data/datasets/sft_instructions.jsonl"   # OSS/Evol-Instruct from real crate snippets
+  trajectories: "data/datasets/sft_trajectories.jsonl"   # rejection-sampled successful agent traces
+  general_replay_frac: 0.25       # 20-30% general instructions vs forgetting
+  assistant_only_loss: true       # mask user/system/tool-observation tokens
+
+hyperparams:
+  lr: 2.0e-5
+  lr_schedule: "cosine"
+  warmup_ratio: 0.05
+  micro_batch_size: 4
+  gradient_accumulation: 8
+  epochs: 2
+  max_seq_len: 16384
+
+overfit_guard:
+  max_perplexity_regression_pct: 5.0   # vs CPT; a weak/overfit SFT gates everything downstream
+
+tracking:
+  wandb: false                         # optional (see cpt.yaml)
+  wandb_project: "hs-sft"
