@@ -117,11 +117,13 @@ def run_cycle(cycle: int, cfg: dict, endpoint: str, sched: curriculum.Scheduler,
         data_manifest_hash="(stamped)", solve_rate=solve,
     )
     champ = reg.promote(cand_ckpt, best, promote)
-    _ledger_append({"cycle": cycle, "solve_rate": solve, "promoted": champ is cand_ckpt,
+    promoted = champ is cand_ckpt
+    _ledger_append({"cycle": cycle, "solve_rate": solve, "promoted": promoted,
                     "n_harvested": len(new_sft)})
+    return promoted
 
 
-def main(cycles: int = 3, endpoint: str = "http://localhost:8000", dry_run: bool = False) -> None:
+def main(cycles: int = 1000, endpoint: str = "http://localhost:8000", dry_run: bool = False) -> None:
     cfg = config.load("flywheel")
     rl_cfg = config.load("rl")
     sched = curriculum.Scheduler(
@@ -129,13 +131,30 @@ def main(cycles: int = 3, endpoint: str = "http://localhost:8000", dry_run: bool
         diversity_max_connector_frac=rl_cfg["curriculum"]["diversity_max_connector_frac"],
     )
     reg = registry.Registry()
+    patience = cfg["stopping"]["plateau_patience_cycles"]
 
+    # cold-start gate: ignite above the floor before any RL (autonomous: halt-with-reason)
     if not cold_start(cfg, endpoint, model="models/sft") and not dry_run:
-        return
+        metrics.log("flywheel", "HALT", reason="cold-start below floor")
+        raise SystemExit(3)
+
+    flat = 0  # consecutive non-promoting cycles -> plateau
     for c in range(cycles):
-        run_cycle(c, cfg, endpoint, sched, reg, dry_run)
+        promoted = run_cycle(c, cfg, endpoint, sched, reg, dry_run)
+        flat = 0 if promoted else flat + 1
+        if flat >= patience:
+            metrics.log("flywheel", "PLATEAU",
+                        reason=f"{patience} cycles without promotion — stopping",
+                        cycle=c)
+            break
+    metrics.log("flywheel", "done", last_cycle=c)
 
 
 if __name__ == "__main__":
-    import sys
-    main(dry_run="--dry-run" in sys.argv)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--cycles", type=int, default=1000)
+    ap.add_argument("--endpoint", default="http://localhost:8000")
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+    main(cycles=a.cycles, endpoint=a.endpoint, dry_run=a.dry_run)
