@@ -69,10 +69,13 @@ def build(cfg: dict) -> tuple[list[dict], list[dict]]:
                 r = json.loads(line)
             except json.JSONDecodeError:
                 skipped += 1; continue
-            # validate teacher output schema before trusting it
-            if not all(str(r.get(k, "")).strip() for k in ("snippet", "problem", "solution")):
+            # validate teacher output schema before trusting it. OSS-Instruct returns
+            # {problem, reasoning} and the code snippet IS the solution → derive it.
+            sol = r.get("solution") or r.get("snippet")
+            if not (str(r.get("snippet", "")).strip() and str(r.get("problem", "")).strip()
+                    and str(sol).strip()):
                 skipped += 1; continue
-            instructions.append(assemble_instruction(r["snippet"], r["problem"], r["solution"]))
+            instructions.append(assemble_instruction(r["snippet"], r["problem"], sol))
             kept += 1
         print(f"instructions: kept {kept}, skipped {skipped} malformed/empty teacher outputs")
 

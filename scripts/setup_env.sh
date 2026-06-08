@@ -23,6 +23,8 @@ make_venv () {  # name, extras  (idempotent: skip if the venv already works)
   "$PYBIN" -m venv "$dir"
   "$dir/bin/python" -m pip install -q --upgrade pip
   "$dir/bin/python" -m pip install -e ".$extras"
+  # vLLM's flashinfer backend JIT-compiles kernels via ninja at serve time → must be present.
+  [ "$dir" = ".venv-serve" ] && "$dir/bin/python" -m pip install -q ninja
 }
 
 install_verl () {  # veRL RL trainer in .venv-verl; .venv-rl -> it. (Validated on GB10/aarch64.)

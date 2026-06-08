@@ -31,8 +31,11 @@ serve_model(){ # $1=model $2=quant ; (re)launch vLLM alone, health-wait
   stop_vllm
   local q=(); [ -n "$2" ] && q=(--quantization "$2")
   echo ">>> serving $1 (${2:-bf16}) ..."
-  .venv-serve/bin/python -m vllm.entrypoints.openai.api_server --model "$1" --port 8000 "${q[@]}" \
-      > "runs/vllm_${TS}.log" 2>&1 &
+  # PATH must include the serve venv bin so flashinfer's JIT finds `ninja`; --max-num-seqs
+  # bounds the Mamba-hybrid (Qwen3.5/Nemotron) state-cache so engine init doesn't fail.
+  PATH="$PWD/.venv-serve/bin:$PATH" \
+  .venv-serve/bin/python -m vllm.entrypoints.openai.api_server --model "$1" --port 8000 \
+      --max-num-seqs 256 "${q[@]}" > "runs/vllm_${TS}.log" 2>&1 &
   VLLM_PID=$!
   for i in $(seq 1 120); do
     curl -sf "$ENDPOINT/v1/models" >/dev/null 2>&1 && { echo ">>> vLLM healthy ($1)"; return 0; }

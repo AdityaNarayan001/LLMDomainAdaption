@@ -1,8 +1,9 @@
 """Teacher-driven SFT instruction synthesis (fixes the 'instruction generation not wired' gap).
 
-Teacher model: **Qwen3.5-122B-A10B** (MoE, ~10B active), self-hosted via vLLM in NVFP4 on
-the GX10. Apache-2.0 => distilled outputs are license-clean to train on AND publish (this
-is a public repo). Same family as the 9B student => good distribution match.
+Teacher model: configurable (configs/sft.yaml teacher.model) — currently **Qwen3.5-27B**,
+self-hosted via vLLM on the GX10 (Phase A, never co-resident with the student). Apache-2.0
+=> distilled outputs are license-clean to train on AND publish (public repo). Same family
+as the 9B student => good distribution match.
 
 Key design (grounded in the repo analysis):
   * Most SFT *solutions* are GOLD from the repo (real connector code, PR diffs, the
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 
 import requests
 
@@ -46,6 +48,20 @@ CHANGE ({path}):
 ```
 
 Respond as JSON: {{"problem": "...", "reasoning": "..."}}  (the diff itself is the solution)"""
+
+
+def _extract_json(text: str) -> dict:
+    """Robustly parse a teacher reply to a dict. response_format=json_object already
+    constrains output, but reasoning models (Qwen3.5/Nemotron) can prepend <think>… or a
+    'Thinking Process:' preamble — strip it and fall back to the first balanced {...}."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            raise
+        return json.loads(m.group(0))
 
 
 def _call_teacher(endpoint: str, model: str, prompt: str, temperature: float = 0.7) -> str:
@@ -98,7 +114,7 @@ def generate(cfg: dict, teacher_cfg: dict, n: int = 2000) -> int:
         for path, snippet in sample_function_snippets(cfg, n):
             try:
                 raw = _call_teacher(endpoint, model, oss_instruct_prompt(path, snippet))
-                rec = json.loads(raw)            # skip-on-parse-error = teacher-output validation
+                rec = _extract_json(raw)         # skip-on-parse-error = teacher-output validation
                 rec["snippet"] = snippet
                 f.write(json.dumps(rec) + "\n")
                 f.flush()                        # crash-safe: each teacher call persisted

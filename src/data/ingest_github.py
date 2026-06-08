@@ -176,10 +176,16 @@ def save(records: list[PRRecord], path: str = "data/datasets/github_prs.jsonl") 
 
 
 if __name__ == "__main__":
+    import os
     cfg = config.load("data")
     repo = cfg["source"]["repo"]
     limit = cfg["github"]["per_page"] * 10
-    if _token():                                   # production path: incremental batched write
+    out = config.ROOT / "data/datasets/github_prs.jsonl"
+    have = len(out.read_text().splitlines()) if out.exists() else 0
+    if have >= limit and os.environ.get("FORCE_INGEST") != "1":   # idempotent: reuse on resume
+        print(f"github_prs.jsonl already has {have} PRs (>= {limit}) — skipping mine "
+              "(FORCE_INGEST=1 to re-mine).")
+    elif _token():                                 # production path: incremental batched write
         mine_merged_prs(repo, limit=limit, batch=10)
     elif gh_ready():                               # gh CLI: bulk, then write
         save(fetch_merged_prs(repo, limit=limit))
