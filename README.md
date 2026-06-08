@@ -45,6 +45,35 @@ scripts/run_pipeline.sh cpt --dry-run    # emits Axolotl configs; drop --dry-run
 scripts/run_pipeline.sh flywheel --dry-run
 ```
 
+## Reproduce on a GPU box (the three auto-switching venvs)
+
+The three stacks have mutually-exclusive pins (torch/transformers), so they live in
+separate venvs and talk over subprocess/HTTP. `src/venvs.py` + `run_pipeline.sh`
+**auto-switch** to the right one per stage; you never activate them by hand.
+
+```bash
+# one command provisions all three (Linux + CUDA box):
+scripts/setup_env.sh all
+#   .venv        -> ".[train,dev,ast]"      pipeline + Axolotl CPT/SFT
+#   .venv-serve  -> ".[serve]"              vLLM inference/rollout server
+#   .venv-rl     -> symlink to SkyRL's uv venv (cloned as ../SkyRL, `uv sync --extra gpu --extra ray`)
+```
+
+SkyRL specifics (handled by `setup_env.sh rl` / `install_skyrl`): it's the unified
+`skyrl` package installed via **uv** from source; `.venv-rl` symlinks to its env; RL uses
+our `.venv-serve` vLLM as a **remote** engine (`generator.backend=remote`).
+
+**aarch64 / GB10 note:** SkyRL's `gpu` extra pins an x86_64 vLLM/`vllm-router`, so on ARM
+its RL entrypoint needs a few transitive deps installed explicitly — `setup_env.sh` does
+this automatically (`SKYRL_AARCH64_FIX`). On x86_64 boxes this step is a no-op.
+
+**Keeping a remote training box in sync** (code only — never weights/checkpoints/data):
+```bash
+scripts/sync_gx10.sh          # local -> remote
+scripts/sync_gx10.sh pull     # remote -> local
+```
+Set the host/dir at the top of `scripts/sync_gx10.sh`.
+
 ## Layout
 
 ```

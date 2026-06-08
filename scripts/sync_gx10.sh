@@ -11,9 +11,11 @@ LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)/"
 # Excludes: virtualenv, the big repo clone, checkpoints, run artifacts, caches, git.
 # (/data/ /models/ /runs/ are exactly the weights/checkpoints/logs we do NOT rsync.)
 # LEADING SLASH = root-anchored, so these do NOT also match src/data/, etc.
+# No trailing slashes on the venv excludes: .venv-rl is a SYMLINK (to SkyRL's uv venv),
+# and a trailing-slash pattern matches only real dirs -> --delete would wipe the symlink.
 EXCLUDES=(
-  --exclude='/.venv/' --exclude='/.venv-serve/' --exclude='/.venv-rl/'
-  --exclude='/data/' --exclude='/models/' --exclude='/runs/'
+  --exclude='/.venv' --exclude='/.venv-serve' --exclude='/.venv-rl'
+  --exclude='/data' --exclude='/models' --exclude='/runs'
   --exclude='/.git/' --exclude='__pycache__/' --exclude='*.pyc'
   --exclude='.pytest_cache/' --exclude='.ruff_cache/'
 )
