@@ -164,5 +164,20 @@ def test_pattern_reward_tamper_zero(tmp_path):
     assert rb.total == 0.0 and rb.mode == "pattern"
 
 
+def test_venv_router_autoswitch():
+    from src import venvs
+
+    # stages map to the right venv (auto-switch)
+    assert venvs.python_for("cpt").parent.parent.name == ".venv"
+    assert venvs.python_for("sft").parent.parent.name == ".venv"
+    assert venvs.python_for("serve").parent.parent.name == ".venv-serve"
+    assert venvs.python_for("rl").parent.parent.name == ".venv-rl"
+    assert venvs.python_for("flywheel").parent.parent.name == ".venv"
+    # unknown stage falls back to default
+    assert venvs.python_for("whatever").parent.parent.name == ".venv"
+    # interpreter path shape
+    assert venvs.interpreter("serve").name == "python"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

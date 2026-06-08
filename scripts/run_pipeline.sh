@@ -1,20 +1,32 @@
 #!/usr/bin/env bash
-# End-to-end pipeline entrypoint, gated by the milestone ladder (see PLAN.txt / README).
-# Usage: scripts/run_pipeline.sh <stage>
-#   ingest | census | data | cpt | sft | rl | flywheel | eval
+# End-to-end pipeline entrypoint with AUTO-SWITCHING venvs (see src/venvs.py):
+#   .venv (pipeline+training) · .venv-serve (vLLM) · .venv-rl (SkyRL)
+# Usage: scripts/run_pipeline.sh <stage> [args...]
+#   ingest | census | data | cpt | sft | serve | rl | flywheel | eval | smoke
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source .venv/bin/activate 2>/dev/null || true
 
-stage="${1:-help}"
+stage="${1:-help}"; shift || true
+
+# stage -> venv dir (mirror of STAGE_VENV in src/venvs.py)
 case "$stage" in
-  ingest)   python -m src.data.ingest_repos && python -m src.data.ingest_github ;;
-  census)   python -m src.data.census --verify-sample "${2:-0}" ;;   # M1 HARD GATE
-  data)     python -m src.data.build_cpt && python -m src.data.build_rl && python -m src.data.build_sft ;;
-  cpt)      python -m src.train.cpt "${@:2}" ;;
-  sft)      python -m src.train.sft "${@:2}" ;;
-  rl)       python -m src.train.rl "${@:2}" ;;
-  flywheel) python -m src.orchestrate.flywheel "${@:2}" ;;
-  smoke)    python -m pytest tests/ -q ;;
-  help|*)   echo "stages: ingest | census | data | cpt | sft | rl | flywheel | smoke"; exit 1 ;;
+  serve)            VENV=".venv-serve" ;;
+  rl)               VENV=".venv-rl" ;;
+  *)                VENV=".venv" ;;
+esac
+PY="$VENV/bin/python"
+[ -x "$PY" ] || { echo "ERROR: $PY not found. Create it (scripts/setup_env.sh)."; exit 1; }
+echo "[run_pipeline] stage=$stage  venv=$VENV"
+
+case "$stage" in
+  ingest)   "$PY" -m src.data.ingest_repos && "$PY" -m src.data.ingest_github ;;
+  census)   "$PY" -m src.data.census --verify-sample "${1:-0}" ;;     # M1 HARD GATE
+  data)     "$PY" -m src.data.build_cpt && "$PY" -m src.data.build_rl && "$PY" -m src.data.build_sft ;;
+  cpt)      "$PY" -m src.train.cpt "$@" ;;
+  sft)      "$PY" -m src.train.sft "$@" ;;
+  serve)    "$PY" -m vllm.entrypoints.openai.api_server "$@" ;;        # .venv-serve
+  rl)       "$PY" -m src.train.rl "$@" ;;                              # .venv-rl
+  flywheel) "$PY" -m src.orchestrate.flywheel "$@" ;;                  # .venv (shells out to others)
+  smoke)    "$PY" -m pytest tests/ -q ;;
+  help|*)   echo "stages: ingest | census | data | cpt | sft | serve | rl | flywheel | smoke"; exit 1 ;;
 esac

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from src import config, metrics
+from src import config, metrics, venvs
 from src.eval import internal_swebench, report
 from src.orchestrate import curriculum, harvest, insights, registry, rollout_store
 from src.train import rl_metrics
@@ -83,12 +83,12 @@ def run_cycle(cycle: int, cfg: dict, endpoint: str, sched: curriculum.Scheduler,
     harvest.append_jsonl(new_sft, "data/datasets/sft_trajectories.jsonl")
     print(f"[cycle {cycle}] harvested {len(new_sft)} verified trajectories")
 
-    # 3) train (sft + rl) from the current best — shelled out
+    # 3) train (sft + rl) from the current best.
+    #    SFT runs in THIS venv (Axolotl); RL AUTO-SWITCHES to .venv-rl (SkyRL) via venvs.run_rl.
     if not dry_run:
-        from src.train import rl as rl_train
         from src.train import sft as sft_train
-        sft_train.run(cpt_ckpt=best_model)
-        rl_train.run(endpoint=endpoint, sft_ckpt="models/sft")
+        sft_train.run(cpt_ckpt=best_model)        # Axolotl, in .venv
+        venvs.run_rl()                            # SkyRL, shelled into .venv-rl
 
     # 4) eval candidate on frozen HS-Knowledge + 5) McNemar gate
     cand_model = "models/rl"

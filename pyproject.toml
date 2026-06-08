@@ -35,9 +35,10 @@ train = [
 serve = [
     "vllm>=0.13",           # NVFP4 inference on Blackwell
 ]
-# RL backbone.
+# RL backbone. NovaSky SkyRL installs FROM SOURCE (the `skyrl` PyPI name is an unrelated
+# package). skyrl-train is a uv workspace; install via scripts/setup_env.sh rl (which clones
+# the repo and installs skyrl-train[vllm]). We keep only ray here as a plain dep.
 rl = [
-    "skyrl",                # NovaSky SkyRL (skyrl-train / skyrl-agent / skyrl-gym)
     "ray>=2.30",
 ]
 # Optional: AST-aware FIM + snippet extraction (refinement, not critical path).

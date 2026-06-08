@@ -1,4 +1,6 @@
 .venv/
+.venv-serve/
+.venv-rl/
 __pycache__/
 *.pyc
 .pytest_cache/
