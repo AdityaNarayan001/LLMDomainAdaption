@@ -22,7 +22,7 @@ teacher:
   # on the GX10 (~61GB weights). Same family as the 9B student (distribution match).
   # Most SOLUTIONS come from repo gold (real connector code / PR diffs); the teacher
   # mainly phrases instructions + reasoning -> minimal hallucination + licensing exposure.
-  model: "Qwen/Qwen3.5-122B-A10B"
+  model: "Qwen/Qwen3.5-27B"       # local teacher: dense 27B (bf16 ~54GB), served bf16 on the GB10
   endpoint: "http://localhost:8000"
   mode: "offline"                 # generate -> dump -> then train (decouples memory, Risk R5)
   frontier_api_topup: false       # optional small hard-trace seed; OFF by default (ToS/cost)

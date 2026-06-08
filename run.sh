@@ -17,11 +17,11 @@ TS="$(date +%Y%m%d_%H%M%S)"; mkdir -p runs
 LOG="runs/pipeline_${TS}.log"; exec > >(tee -a "$LOG") 2>&1
 
 MODEL="${MODEL:-Qwen/Qwen3.5-9B}"
-TEACHER="${TEACHER:-Qwen/Qwen3.5-122B-A10B}"
+TEACHER="${TEACHER:-Qwen/Qwen3.5-27B}"
 ENDPOINT="${ENDPOINT:-http://localhost:8000}"
 CYCLES="${CYCLES:-1000}"; CENSUS_VERIFY="${CENSUS_VERIFY:-25}"
-QUANT="${QUANT:-}"; QUANT_TEACHER="${QUANT_TEACHER:-modelopt_fp4}"
-export PREP_TEACHER=1 MODEL TEACHER
+QUANT="${QUANT:-}"; QUANT_TEACHER="${QUANT_TEACHER-modelopt_fp4}"  # '-' not ':-': empty => bf16
+export PREP_TEACHER="${PREP_TEACHER:-1}" MODEL TEACHER
 
 echo "================ run ${TS}  student=$MODEL teacher=$TEACHER ================"
 halt(){ echo ">>> HALT: $1"; stop_vllm; exit "${2:-1}"; }
