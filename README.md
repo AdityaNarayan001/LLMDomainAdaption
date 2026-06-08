@@ -74,6 +74,26 @@ scripts/sync_gx10.sh pull     # remote -> local
 ```
 Set the host/dir at the top of `scripts/sync_gx10.sh`.
 
+## Model saving, best-selection & serving
+
+Checkpoints are **disk-bounded and self-curating** (SFT/RL are LoRA, so per-cycle
+adapters are tiny):
+
+- Per cycle → `models/cycle_<N>/{sft,rl}`. After each cycle the registry **keeps
+  `champion + top-5 + latest`** (`keep_top_k: 5`) and prunes the rest.
+- **Promotion/retention** uses the McNemar gate on held-out **HS-Knowledge**.
+- The **shipped best** is crowned on the **untouched sequestered set** (max
+  lower-confidence-bound + HS-SWE non-regression guard) → `runs/best_model.json`.
+
+**Export a single, vLLM-servable model** (merges the champion's CPT→SFT→RL stack):
+```bash
+scripts/export_champion.sh            # -> models/champion_export/ (safetensors + tokenizer
+                                      #    + config + generation_config + SERVE.md)
+scripts/serve_champion.sh             # host it with vLLM (NVFP4); OpenAI endpoint :8000/v1
+```
+The export is fully self-contained (weights as safetensors, full tokenizer,
+`config.json`, `generation_config.json`) — drop the folder on any vLLM host.
+
 ## Layout
 
 ```

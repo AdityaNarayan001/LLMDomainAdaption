@@ -13,7 +13,7 @@ from src import config
 from src.eval import perplexity
 
 
-def axolotl_config(cfg: dict, cpt_ckpt: str) -> dict:
+def axolotl_config(cfg: dict, cpt_ckpt: str, out_dir: str = "models/sft") -> dict:
     lora = cfg["method"]["lora"]
     hp = cfg["hyperparams"]
     return {
@@ -33,7 +33,7 @@ def axolotl_config(cfg: dict, cpt_ckpt: str) -> dict:
         "micro_batch_size": hp["micro_batch_size"],
         "gradient_accumulation_steps": hp["gradient_accumulation"],
         "num_epochs": hp["epochs"],
-        "output_dir": "models/sft",
+        "output_dir": out_dir,
         **(
             {"report_to": "wandb", "wandb_project": cfg["tracking"]["wandb_project"]}
             if cfg.get("tracking", {}).get("wandb")
@@ -42,13 +42,14 @@ def axolotl_config(cfg: dict, cpt_ckpt: str) -> dict:
     }
 
 
-def run(dry_run: bool = False, cpt_ckpt: str = "models/cpt/pr_mastery") -> None:
+def run(dry_run: bool = False, cpt_ckpt: str = "models/cpt/pr_mastery",
+        out_dir: str = "models/sft") -> None:
     cfg = config.load("sft")
-    ax = axolotl_config(cfg, cpt_ckpt)
+    ax = axolotl_config(cfg, cpt_ckpt, out_dir=out_dir)
     cfg_path = config.RUNS / "axolotl_sft.yaml"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(yaml.safe_dump(ax))
-    print(f"[SFT] -> {cfg_path}")
+    print(f"[SFT] -> {cfg_path}  (out_dir={out_dir})")
     if dry_run:
         return
     subprocess.run(["axolotl", "train", str(cfg_path)], check=True)
@@ -58,7 +59,7 @@ def run(dry_run: bool = False, cpt_ckpt: str = "models/cpt/pr_mastery") -> None:
     try:
         reg = perplexity.forgetting_regression_pct(
             perplexity.perplexity(cpt_ckpt, heldout),
-            perplexity.perplexity("models/sft", heldout),
+            perplexity.perplexity(out_dir, heldout),
         )
         limit = cfg["overfit_guard"]["max_perplexity_regression_pct"]
         print(f"[SFT] perplexity regression vs CPT: {reg:.1f}% (limit {limit}%)")

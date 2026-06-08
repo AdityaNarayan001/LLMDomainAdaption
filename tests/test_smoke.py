@@ -179,5 +179,45 @@ def test_venv_router_autoswitch():
     assert venvs.interpreter("serve").name == "python"
 
 
+def test_registry_prune_keeps_champion_topk_latest(tmp_path):
+    import src.orchestrate.registry as R
+    from src.orchestrate.registry import Checkpoint, Registry
+
+    real_root = R.config.ROOT
+    R.config.ROOT = tmp_path                       # adapter_dir resolves under tmp_path
+    try:
+        reg = Registry(keep_top_k=2)
+        reg.path = tmp_path / "reg.jsonl"
+        for i, sr in enumerate([0.10, 0.50, 0.30, 0.40, 0.05]):  # cycle i, solve_rate sr
+            (tmp_path / f"cycle_{i}").mkdir()
+            (tmp_path / f"cycle_{i}" / "w.bin").write_text("x")
+            reg.record(Checkpoint(cycle=i, base_model="b", adapter_stack=["cpt", f"cycle_{i}"],
+                                  data_manifest_hash="h", solve_rate=sr, adapter_dir=f"cycle_{i}"))
+        keep, deleted = reg.prune()
+        kept_cycles = {int(k.split("_")[-1]) for k in keep}
+        assert kept_cycles == {1, 3, 4}            # champion(1) + top2(1,3) + latest(4)
+        assert not (tmp_path / "cycle_0").exists()  # pruned
+        assert not (tmp_path / "cycle_2").exists()  # pruned
+        assert (tmp_path / "cycle_1").exists()      # champion kept
+    finally:
+        R.config.ROOT = real_root
+
+
+def test_registry_select_best_lcb_and_non_regression(tmp_path):
+    from src.orchestrate.registry import Checkpoint, Registry
+
+    reg = Registry(keep_top_k=10)
+    reg.path = tmp_path / "reg.jsonl"
+    # c1: high HS-Knowledge but tanked HS-SWE (forgetting) -> blocked by floor
+    reg.record(Checkpoint(1, "b", ["cpt", "a1"], "h", 0.6, adapter_dir="a1",
+                          sequestered_lcb=0.55, hs_swe_solve=0.05))
+    # c2: slightly lower seq but healthy HS-SWE -> should win under floor=0.3
+    reg.record(Checkpoint(2, "b", ["cpt", "a2"], "h", 0.5, adapter_dir="a2",
+                          sequestered_lcb=0.50, hs_swe_solve=0.40))
+    best = reg.select_best(hs_swe_floor=0.30)
+    assert best.adapter_dir == "a2"            # non-regression guard picks the healthy one
+    assert reg.select_best(hs_swe_floor=0.0).adapter_dir == "a1"  # no floor -> max LCB
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

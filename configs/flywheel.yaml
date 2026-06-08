@@ -21,6 +21,8 @@ registry:
   # a checkpoint is a TUPLE: base hash + adapter stack + data-manifest hash + eval result (Risk R10)
   track_lineage: true
   rollback_on_regression: true
+  keep_top_k: 5                   # retain champion + top-5 + latest; prune the rest (adapters are tiny)
+  hs_swe_floor: 0.0               # non-regression guard for the SHIPPED best (sequestered crowning)
 
 stopping:
   plateau_patience_cycles: 5      # flat learning curve -> change curriculum/hyperparams, then escalate

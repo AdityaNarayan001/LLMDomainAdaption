@@ -23,12 +23,13 @@ import sys
 from src import config
 
 
-def skyrl_overrides(cfg: dict, endpoint: str, sft_ckpt: str) -> list[str]:
+def skyrl_overrides(cfg: dict, endpoint: str, sft_ckpt: str, out_dir: str) -> list[str]:
     """Map our configs/rl.yaml -> SkyRL hydra overrides (key names are M3 TODO)."""
     a = cfg["algorithm"]
     r = cfg["rollout"]
     return [
         f"trainer.algorithm={a['name']}",            # dapo
+        f"trainer.export_path={out_dir}",            # per-cycle adapter dir (retention)
         f"trainer.policy.model.path={sft_ckpt}",
         f"trainer.policy.lora.rank={cfg['policy_lora']['r']}",
         f"trainer.algorithm.group_size={a['group_size']}",
@@ -46,15 +47,15 @@ def skyrl_overrides(cfg: dict, endpoint: str, sft_ckpt: str) -> list[str]:
     ]
 
 
-def build_command(cfg: dict, endpoint: str, sft_ckpt: str) -> list[str]:
+def build_command(cfg: dict, endpoint: str, sft_ckpt: str, out_dir: str) -> list[str]:
     return [sys.executable, "-m", "skyrl.train.entrypoints.main_base",
-            *skyrl_overrides(cfg, endpoint, sft_ckpt)]
+            *skyrl_overrides(cfg, endpoint, sft_ckpt, out_dir)]
 
 
 def run(dry_run: bool = False, endpoint: str = "http://localhost:8000",
-        sft_ckpt: str = "models/sft") -> None:
+        sft_ckpt: str = "models/sft", out_dir: str = "models/rl") -> None:
     cfg = config.load("rl")
-    cmd = build_command(cfg, endpoint, sft_ckpt)
+    cmd = build_command(cfg, endpoint, sft_ckpt, out_dir)
     print("[RL] SkyRL entrypoint:\n  " + " ".join(cmd))
     if dry_run:
         return
@@ -62,4 +63,11 @@ def run(dry_run: bool = False, endpoint: str = "http://localhost:8000",
 
 
 if __name__ == "__main__":
-    run(dry_run="--dry-run" in sys.argv)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--endpoint", default="http://localhost:8000")
+    ap.add_argument("--sft-ckpt", default="models/sft")
+    ap.add_argument("--out", default="models/rl")
+    a = ap.parse_args()
+    run(dry_run=a.dry_run, endpoint=a.endpoint, sft_ckpt=a.sft_ckpt, out_dir=a.out)

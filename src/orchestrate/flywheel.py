@@ -83,15 +83,17 @@ def run_cycle(cycle: int, cfg: dict, endpoint: str, sched: curriculum.Scheduler,
     harvest.append_jsonl(new_sft, "data/datasets/sft_trajectories.jsonl")
     print(f"[cycle {cycle}] harvested {len(new_sft)} verified trajectories")
 
-    # 3) train (sft + rl) from the current best.
+    # 3) train (sft + rl) into PER-CYCLE dirs (so checkpoints don't overwrite -> retention).
     #    SFT runs in THIS venv (Axolotl); RL AUTO-SWITCHES to .venv-rl (SkyRL) via venvs.run_rl.
+    cycle_dir = f"models/cycle_{cycle}"
+    sft_out, rl_out = f"{cycle_dir}/sft", f"{cycle_dir}/rl"
     if not dry_run:
         from src.train import sft as sft_train
-        sft_train.run(cpt_ckpt=best_model)        # Axolotl, in .venv
-        venvs.run_rl()                            # SkyRL, shelled into .venv-rl
+        sft_train.run(cpt_ckpt=best_model, out_dir=sft_out)       # Axolotl, in .venv
+        venvs.run_rl("--sft-ckpt", sft_out, "--out", rl_out)      # SkyRL, shelled into .venv-rl
 
     # 4) eval candidate on frozen HS-Knowledge + 5) McNemar gate
-    cand_model = "models/rl"
+    cand_model = rl_out
     promote = True
     if not dry_run:
         cand = internal_swebench.run_suite(
@@ -110,17 +112,54 @@ def run_cycle(cycle: int, cfg: dict, endpoint: str, sched: curriculum.Scheduler,
     else:
         solve = 0.0
 
-    # 6) promote + 7) ledger
+    # 6) promote + 7) ledger + 8) prune to champion + top-K + latest (disk-bounded)
     cand_ckpt = registry.Checkpoint(
         cycle=cycle, base_model=config.load("cpt")["base_model"],
-        adapter_stack=["models/cpt/pr_mastery", "models/sft", cand_model],
-        data_manifest_hash="(stamped)", solve_rate=solve,
+        adapter_stack=["models/cpt/pr_mastery", sft_out, rl_out],
+        data_manifest_hash="(stamped)", solve_rate=solve, adapter_dir=cycle_dir,
     )
     champ = reg.promote(cand_ckpt, best, promote)
     promoted = champ is cand_ckpt
+    kept, deleted = reg.prune()
     _ledger_append({"cycle": cycle, "solve_rate": solve, "promoted": promoted,
-                    "n_harvested": len(new_sft)})
+                    "n_harvested": len(new_sft), "kept": sorted(kept), "pruned": deleted})
+    if deleted:
+        metrics.log("flywheel", "prune", cycle=cycle, deleted=len(deleted), kept=len(kept))
     return promoted
+
+
+def crown_best(reg: registry.Registry, endpoint: str, hs_swe_floor: float) -> None:
+    """Tier-2: decide the SHIPPED best on the UNTOUCHED sequestered set (decision-leakage-free).
+    Evaluate only the kept candidates; pick max lower-confidence-bound with HS-SWE non-regression.
+    Writes runs/best_model.json (the deployable pointer). Touched only here, not per-cycle."""
+    weights = config.load("rl")["reward"]["weights"]
+    scored: list[registry.Checkpoint] = []
+    for c in reg.all():
+        if c.adapter_dir not in reg.keepers():
+            continue
+        seq = internal_swebench.run_suite("sequestered", "eval_sets/sequestered",
+                                          model=c.adapter_stack[-1], endpoint=endpoint,
+                                          weights=weights, closed_context=True)
+        swe = internal_swebench.run_suite("hs_swe", "eval_sets/hs_swe",
+                                          model=c.adapter_stack[-1], endpoint=endpoint,
+                                          weights=weights)
+        n = len(seq.per_task)
+        c.sequestered_lcb = metrics.wilson_ci(sum(t.solved for t in seq.per_task), n)[0]
+        c.hs_swe_solve = swe.solve_rate
+        scored.append(c)
+    if not scored:
+        return
+    best = max(
+        [c for c in scored if (c.hs_swe_solve or 0.0) >= hs_swe_floor] or scored,
+        key=lambda c: (c.sequestered_lcb, c.solve_rate),
+    )
+    (config.RUNS / "best_model.json").write_text(json.dumps({
+        "adapter_stack": best.adapter_stack, "adapter_dir": best.adapter_dir,
+        "sequestered_lcb": best.sequestered_lcb, "hs_swe_solve": best.hs_swe_solve,
+        "hs_knowledge_solve": best.solve_rate, "cycle": best.cycle,
+    }, indent=2))
+    metrics.log("flywheel", "crowned_best", cycle=best.cycle,
+                sequestered_lcb=round(best.sequestered_lcb, 4), hs_swe=round(best.hs_swe_solve or 0, 4))
 
 
 def main(cycles: int = 1000, endpoint: str = "http://localhost:8000", dry_run: bool = False) -> None:
@@ -130,7 +169,7 @@ def main(cycles: int = 1000, endpoint: str = "http://localhost:8000", dry_run: b
         band=tuple(rl_cfg["curriculum"]["solve_band"]),
         diversity_max_connector_frac=rl_cfg["curriculum"]["diversity_max_connector_frac"],
     )
-    reg = registry.Registry()
+    reg = registry.Registry(keep_top_k=cfg["registry"]["keep_top_k"])
     patience = cfg["stopping"]["plateau_patience_cycles"]
 
     # cold-start gate: ignite above the floor before any RL (autonomous: halt-with-reason)
@@ -147,6 +186,9 @@ def main(cycles: int = 1000, endpoint: str = "http://localhost:8000", dry_run: b
                         reason=f"{patience} cycles without promotion — stopping",
                         cycle=c)
             break
+    # crown the SHIPPED best on the sequestered set (Tier-2), then we're done
+    if not dry_run:
+        crown_best(reg, endpoint, cfg["registry"]["hs_swe_floor"])
     metrics.log("flywheel", "done", last_cycle=c)
 
 
