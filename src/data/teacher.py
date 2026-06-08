@@ -107,6 +107,37 @@ def generate(cfg: dict, teacher_cfg: dict, n: int = 2000) -> int:
     return written
 
 
+def gen_trajectories(endpoint: str, model: str, weights: dict, n_tasks: int = 200,
+                     samples_per_task: int = 4) -> int:
+    """Run a (teacher/base) model through the Pi harness on RL tasks -> raw trajectories.
+    Writes data/datasets/sft_trajectories_raw.jsonl ({chat, reward}); build_sft then
+    rejection-samples to verified successes. Needs the vLLM endpoint up."""
+    from src.harness import runner
+
+    tasks_path = config.ROOT / "data/datasets/rl_tasks.jsonl"
+    if not tasks_path.exists():
+        print("WARN: no rl_tasks.jsonl — run build_rl first; skipping trajectory gen.")
+        return 0
+    tasks = [json.loads(line) for line in tasks_path.read_text().splitlines()][:n_tasks]
+    out = config.ROOT / "data/datasets/sft_trajectories_raw.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with out.open("w") as f:
+        for task in tasks:
+            for _ in range(samples_per_task):
+                try:
+                    traj = runner.run_task(task, endpoint=endpoint, model=model,
+                                           weights=weights, temperature=0.8)
+                except Exception:  # pragma: no cover - runtime/env dependent
+                    continue
+                f.write(json.dumps({
+                    "chat": {"messages": traj.messages, "loss_mask": traj.loss_mask},
+                    "reward": traj.reward,
+                }) + "\n")
+                written += 1
+    return written
+
+
 if __name__ == "__main__":
     cfg = config.load("data")
     tcfg = config.load("sft")["teacher"]

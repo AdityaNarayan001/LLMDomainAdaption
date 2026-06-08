@@ -1,7 +1,9 @@
 # Stage 4 — RL on the Pi harness via SkyRL. DAPO over verifiable test rewards.
 base: "sft"                       # start from SFT checkpoint
-framework: "skyrl"                # veRL = fallback (Risk R-int)
-harness: "pi"                     # pi-mono; bridged via Polar-style API proxy
+framework: "verl"                 # veRL (chosen over SkyRL+Harbor — drives our own reward/env)
+harness: "pi"                     # Pi harness used for SFT-data-gen + eval; RL via veRL
+mode: "single_turn_rlvr"          # first pass: generate patch -> verifiable cargo reward.
+                                  # multi-turn agentic rollout is the upgrade.
 
 algorithm:
   name: "dapo"                    # GRPO + clip-higher + dynamic sampling + token-level loss

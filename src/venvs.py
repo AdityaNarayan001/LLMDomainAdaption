@@ -5,7 +5,7 @@ separate venvs and talk over subprocess/HTTP (never in-process imports across st
 
   .venv        pipeline + training (Axolotl CPT/SFT) + data/eval/orchestration
   .venv-serve  vLLM (inference / rollout server, OpenAI-compatible endpoint)
-  .venv-rl     SkyRL (RL trainer; drives a vLLM rollout engine)
+  .venv-rl     veRL (RL trainer; GRPO/DAPO with our verifiable cargo reward) [-> .venv-verl]
 
 `run_pipeline.sh` resolves the interpreter per stage via this module; the flywheel
 orchestrator (running in .venv) shells out to .venv-rl for RL training and launches

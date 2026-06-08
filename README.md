@@ -59,13 +59,15 @@ scripts/setup_env.sh all
 #   .venv-rl     -> symlink to SkyRL's uv venv (cloned as ../SkyRL, `uv sync --extra gpu --extra ray`)
 ```
 
-SkyRL specifics (handled by `setup_env.sh rl` / `install_skyrl`): it's the unified
-`skyrl` package installed via **uv** from source; `.venv-rl` symlinks to its env; RL uses
-our `.venv-serve` vLLM as a **remote** engine (`generator.backend=remote`).
+RL backend = **veRL** (`setup_env.sh rl` / `install_verl`): `.venv-verl` with `verl` + a
+few transitive deps; `.venv-rl` symlinks to it. RL is GRPO/DAPO via `verl.trainer.main_ppo`
+with our **verifiable cargo reward** (`src/train/verl_reward.py`) — first pass is single-turn
+RLVR (generate patch → verify); multi-turn agentic rollout is the upgrade. (SkyRL was
+evaluated but needs the Harbor framework, which doesn't fit our Pi harness.)
 
-**aarch64 / GB10 note:** SkyRL's `gpu` extra pins an x86_64 vLLM/`vllm-router`, so on ARM
-its RL entrypoint needs a few transitive deps installed explicitly — `setup_env.sh` does
-this automatically (`SKYRL_AARCH64_FIX`). On x86_64 boxes this step is a no-op.
+**Teacher = Qwen3.5-122B-A10B**, and the run **phases the GPU** so teacher and student never
+coexist (they don't fit): `run.sh` serves the **teacher alone** for SFT data-gen → tears it
+down → trains the student (CPT/SFT) → serves the **student** for census + the flywheel.
 
 **Keeping a remote training box in sync** (code only — never weights/checkpoints/data):
 ```bash

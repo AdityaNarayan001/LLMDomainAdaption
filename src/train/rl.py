@@ -1,19 +1,16 @@
-"""Stage 4 — RL launcher. Drives NovaSky SkyRL's config-driven entrypoint.
+"""Stage 4 — RL launcher. Drives **veRL** (GRPO/DAPO) with our verifiable cargo reward.
 
-SkyRL is NOT a `from X import Trainer` API — it is run as a config-driven entrypoint:
-    python -m skyrl.train.entrypoints.main_base <hydra/omegaconf overrides>
-with the algorithm (GRPO/PPO/DAPO), model, dataset, reward, and generation backend
-selected via config. This module is executed *inside* .venv-rl (the SkyRL uv venv, via
-the venv router), so `skyrl` is importable here.
+veRL is run as a config-driven entrypoint:
+    python -m verl.trainer.main_ppo <hydra overrides>
+We use GRPO (adv_estimator=grpo) with DAPO-style knobs, vLLM rollout, our task parquet
+(built by build_verl.py), and our **custom reward** (src/train/verl_reward.compute_score)
+which applies the generated patch and runs the cargo verifier (reuses src.harness.reward).
 
-Generation backend = our **.venv-serve vLLM** reached over a remote OpenAI endpoint
-(SkyRL supports a remote inference engine via base_url). This is also what makes RL work
-on the aarch64 GB10, where SkyRL's *bundled* x86_64 vLLM/router doesn't install.
+Runs inside .venv-rl (-> veRL env). Pi harness stays the eval harness; this first RL pass
+is single-turn RLVR (generate patch -> verify); multi-turn agentic rollout is the upgrade.
 
-NOTE (M3): the exact override KEYS below must be finalized against SkyRL's config schema
-(see SkyRL/skyrl/train/config/) and our env must be registered as a skyrl-gym env. The
-shape here (entrypoint + overrides + remote engine) is correct; the precise field names
-are the remaining RL-stage integration task.
+NOTE (validation): exact veRL 0.8 override keys + the reward-fn signature must be confirmed
+on a live run; the shape (entrypoint + GRPO + custom reward + parquet) is correct.
 """
 from __future__ import annotations
 
@@ -22,41 +19,44 @@ import sys
 
 from src import config
 
+REWARD_FN = "src/train/verl_reward.py"
 
-def skyrl_overrides(cfg: dict, endpoint: str, sft_ckpt: str, out_dir: str) -> list[str]:
-    """Map our configs/rl.yaml -> SkyRL hydra overrides (key names are M3 TODO)."""
+
+def verl_overrides(cfg: dict, endpoint: str, sft_ckpt: str, out_dir: str) -> list[str]:
     a = cfg["algorithm"]
     r = cfg["rollout"]
+    train_parquet = f"{config.ROOT}/data/datasets/rl_verl_train.parquet"
     return [
-        f"trainer.algorithm={a['name']}",            # dapo
-        f"trainer.export_path={out_dir}",            # per-cycle adapter dir (retention)
-        f"trainer.policy.model.path={sft_ckpt}",
-        f"trainer.policy.lora.rank={cfg['policy_lora']['r']}",
-        f"trainer.algorithm.group_size={a['group_size']}",
-        f"trainer.algorithm.lr={a['lr']}",
-        f"trainer.algorithm.kl_coef={0.0 if a['kl_free'] else a['kl_beta']}",
-        # remote generation engine = our .venv-serve vLLM (aarch64-friendly path)
-        "generator.backend=remote",
-        f"generator.inference_engine.base_url={endpoint}",
-        f"generator.sampling.n={r['samples_per_task']}",
-        f"generator.sampling.temperature={r['temperature']}",
-        f"generator.sampling.max_tokens={r['max_tokens']}",
-        # our task env + dataset (registered as a skyrl-gym env — M3)
-        "environment.env_class=hyperswitch",
-        f"data.train_data={config.ROOT}/data/datasets/rl_tasks.jsonl",
+        "algorithm.adv_estimator=grpo",                       # GRPO base (DAPO knobs below)
+        f"data.train_files={train_parquet}",
+        f"data.train_batch_size={a['prompts_per_batch']}",
+        f"actor_rollout_ref.model.path={sft_ckpt}",
+        f"actor_rollout_ref.rollout.name=vllm",
+        f"actor_rollout_ref.rollout.n={r['samples_per_task']}",          # group size G
+        f"actor_rollout_ref.rollout.temperature={r['temperature']}",
+        f"actor_rollout_ref.actor.optim.lr={a['lr']}",
+        f"actor_rollout_ref.actor.clip_ratio_high={a['clip_high']}",     # DAPO clip-higher
+        f"actor_rollout_ref.actor.clip_ratio_low={a['clip_low']}",
+        f"algorithm.use_kl_in_reward={'false' if a['kl_free'] else 'true'}",
+        f"algorithm.filter_groups.enable={'true' if a['dynamic_sampling'] else 'false'}",  # DAPO dyn-sampling
+        # our verifiable cargo reward
+        f"custom_reward_function.path={config.ROOT}/{REWARD_FN}",
+        "custom_reward_function.name=compute_score",
+        f"trainer.default_local_dir={out_dir}",
+        "trainer.total_epochs=1",
     ]
 
 
 def build_command(cfg: dict, endpoint: str, sft_ckpt: str, out_dir: str) -> list[str]:
-    return [sys.executable, "-m", "skyrl.train.entrypoints.main_base",
-            *skyrl_overrides(cfg, endpoint, sft_ckpt, out_dir)]
+    return [sys.executable, "-m", "verl.trainer.main_ppo",
+            *verl_overrides(cfg, endpoint, sft_ckpt, out_dir)]
 
 
 def run(dry_run: bool = False, endpoint: str = "http://localhost:8000",
         sft_ckpt: str = "models/sft", out_dir: str = "models/rl") -> None:
     cfg = config.load("rl")
     cmd = build_command(cfg, endpoint, sft_ckpt, out_dir)
-    print("[RL] SkyRL entrypoint:\n  " + " ".join(cmd))
+    print("[RL] veRL entrypoint:\n  " + " ".join(cmd))
     if dry_run:
         return
     subprocess.run(cmd, cwd=str(config.ROOT), check=True)

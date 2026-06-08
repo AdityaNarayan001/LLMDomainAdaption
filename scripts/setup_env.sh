@@ -12,43 +12,39 @@ cd "$(dirname "$0")/.."
 PYBIN="${PYBIN:-python3}"
 
 REPO_ROOT="$(pwd)"
-SKYRL_DIR="${SKYRL_DIR:-$REPO_ROOT/../SkyRL}"     # SkyRL cloned as a sibling of the repo
-# Deps SkyRL's RL entrypoint needs that its `gpu` extra skips on aarch64 (their pinned
-# vLLM/vllm-router carry an x86_64 marker, so this transitive set isn't pulled on ARM):
-SKYRL_AARCH64_FIX="loguru fastapi uvicorn omegaconf skyrl_gym jaxtyping torchdata"
-SKYRL_OUR_DEPS="pyyaml pydantic requests datasets tqdm rich datasketch scipy"
+# veRL deps pip skips on aarch64 + our core deps (so the custom reward imports our src):
+VERL_FIX="cachetools uvicorn fastapi"
+VERL_OUR_DEPS="pyyaml pydantic requests datasets tqdm rich datasketch scipy"
 
-make_venv () {  # name, extras
+make_venv () {  # name, extras  (idempotent: skip if the venv already works)
   local dir="$1" extras="$2"
+  if [ -x "$dir/bin/python" ]; then echo "=== $dir exists — skipping ==="; return; fi
   echo "=== $dir  ($extras) ==="
   "$PYBIN" -m venv "$dir"
   "$dir/bin/python" -m pip install -q --upgrade pip
   "$dir/bin/python" -m pip install -e ".$extras"
 }
 
-install_skyrl () {  # NovaSky SkyRL (unified `skyrl` package) via its uv flow; .venv-rl -> it
-  command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:$PATH"
-  echo "=== SkyRL: clone + uv sync --extra gpu --extra ray  ($SKYRL_DIR) ==="
-  [ -d "$SKYRL_DIR/.git" ] || git clone --depth 1 https://github.com/NovaSky-AI/SkyRL.git "$SKYRL_DIR"
-  ( cd "$SKYRL_DIR" && uv sync --extra gpu --extra ray )
-  local SKPY="$SKYRL_DIR/.venv/bin/python"
-  # complete the aarch64-skipped deps + our core deps so the entrypoint + our env import
-  uv pip install --python "$SKPY" -q $SKYRL_AARCH64_FIX $SKYRL_OUR_DEPS
-  echo "=== point .venv-rl at SkyRL's uv venv ==="
-  rm -rf "$REPO_ROOT/.venv-rl"; ln -s "$SKYRL_DIR/.venv" "$REPO_ROOT/.venv-rl"
-  "$REPO_ROOT/.venv-rl/bin/python" -c "import skyrl.train.entrypoints.main_base; print('SkyRL RL env OK')"
+install_verl () {  # veRL RL trainer in .venv-verl; .venv-rl -> it
+  if [ -x "$REPO_ROOT/.venv-rl/bin/python" ]; then echo "=== .venv-rl exists — skipping veRL ==="; return; fi
+  echo "=== veRL: .venv-verl + pip install verl (+ aarch64-skipped deps + our deps) ==="
+  "$PYBIN" -m venv .venv-verl
+  .venv-verl/bin/python -m pip install -q --upgrade pip
+  .venv-verl/bin/python -m pip install verl
+  .venv-verl/bin/python -m pip install -q $VERL_FIX $VERL_OUR_DEPS
+  rm -rf "$REPO_ROOT/.venv-rl"; ln -s "$REPO_ROOT/.venv-verl" "$REPO_ROOT/.venv-rl"
+  .venv-rl/bin/python -c "import verl.trainer.main_ppo; import src.harness.reward; print('veRL RL env OK')"
 }
 
 case "${1:-all}" in
   core)  make_venv .venv "[dev,ast]" ;;
   main)  make_venv .venv "[train,dev,ast]" ;;
   serve) make_venv .venv-serve "[serve]" ;;
-  rl)    install_skyrl ;;                          # .venv-rl is a symlink to SkyRL's uv venv
+  rl)    install_verl ;;                            # .venv-rl -> .venv-verl (veRL)
   all)
     make_venv .venv "[train,dev,ast]"
     make_venv .venv-serve "[serve]"
-    install_skyrl
+    install_verl
     ;;
   *) echo "usage: setup_env.sh main|serve|rl|all|core"; exit 1 ;;
 esac

@@ -21,7 +21,8 @@ echo "[run_pipeline] stage=$stage  venv=$VENV"
 case "$stage" in
   ingest)   "$PY" -m src.data.ingest_repos && "$PY" -m src.data.ingest_github ;;
   census)   "$PY" -m src.data.census --verify-sample "${1:-0}" ;;     # M1 HARD GATE
-  data)     "$PY" -m src.data.build_cpt && "$PY" -m src.data.build_rl && "$PY" -m src.data.build_sft ;;
+  data)     "$PY" -m src.data.build_cpt && "$PY" -m src.data.build_rl \
+            && "$PY" -m src.data.build_verl && "$PY" -m src.data.gen_sft ;;
   cpt)      "$PY" -m src.train.cpt "$@" ;;
   sft)      "$PY" -m src.train.sft "$@" ;;
   serve)    "$PY" -m vllm.entrypoints.openai.api_server "$@" ;;        # .venv-serve
