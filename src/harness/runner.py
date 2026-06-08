@@ -118,13 +118,20 @@ def run_task(
                 })
                 traj.loss_mask.append(False)  # tool output -> masked (not model's tokens)
 
-        breakdown = reward_mod.execution_reward(
-            workdir,
-            package=(task["crates"][0] if task.get("single_crate") else None),
-            expected_fail_to_pass=task.get("fail_to_pass", []),
-            tampered=box.tampered,
-            weights=weights,
-        )
+        package = task["crates"][0] if task.get("single_crate") else None
+        if task.get("verify_mode") == "pattern":
+            # connector/integration: no cheap unit tests -> compile+clippy+similarity-to-gold
+            candidate_patch = box.bash("git diff")
+            breakdown = reward_mod.pattern_reward(
+                workdir, package, candidate_patch, task.get("gold_patch"),
+                tampered=box.tampered, weights=weights,
+            )
+        else:
+            breakdown = reward_mod.execution_reward(
+                workdir, package=package,
+                expected_fail_to_pass=task.get("fail_to_pass", []),
+                tampered=box.tampered, weights=weights,
+            )
         traj.reward = breakdown.total
         traj.breakdown = breakdown.__dict__
     finally:

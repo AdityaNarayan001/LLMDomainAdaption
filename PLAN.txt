@@ -384,3 +384,43 @@ The audit's core finding: the real bottleneck is **data supply + Rust build thro
 | NVFP4 inference works in vLLM on GB10 today | → FP8/bf16 rollouts (slower) |
 | GB10 ≈128GB unified, ~273 GB/s, ~1 PFLOP sparse FP4 | → re-derive the memory/throughput envelope |
 | SkyRL Tinker API gives single→multi-node with no rewrite | → accept a separate scale-out launcher |
+
+---
+
+## Dataset deep-dive (grounded in cloning + analyzing hyperswitch)
+
+Findings from the real repo (325MB clone, 38 crates, 147 connectors, Apache-2.0):
+
+**1. Verification splits into two pools — connectors are NOT cheaply verifiable.**
+- `connector-template/test.rs` shows connector tests construct live `ConnectorAuthentication`
+  and make real authorize/refund API calls → need credentials + network. Only **3** connector
+  files have inline `#[cfg(test)]`; **0** runnable connector test files in the crate.
+- So execution-verified RLVR is only affordable in **pure-unit crates with no DB/creds**:
+  `common_utils` (12 test files), `euclid` (6), `common_enums`, `cards`, `diesel_models`,
+  `masking`, `router_env`, `hyperswitch_interfaces` (all 0 DB/redis in tests). This is the
+  scarce **execution pool** (the M1 gate now counts THESE, via `build_rl.verify_mode`).
+- Everything connector/integration is the **pattern pool**: reward = `cargo check` + `clippy`
+  + **patch-similarity-to-gold** (execution-free, no creds) — see `reward.pattern_reward`.
+
+**2. SFT solutions are mostly GOLD from the repo, not teacher-invented.**
+- 147 real connector implementations + `connector-template/` (Liquid-templated scaffold) +
+  `add_connector.md` (1255-line canonical guide) = the connector pattern is overwhelmingly
+  learnable from existing Apache-2.0 code. For "implement connector X", the **real merged
+  code IS the solution**; the teacher only phrases the instruction + reasoning (`teacher.py`).
+- This minimizes teacher hallucination AND licensing exposure.
+
+**3. Teacher model — LOCKED: Qwen3.5-122B-A10B** (MoE, ~10B active).
+- Apache-2.0 → distilled outputs are license-clean to train on AND **publish** (public repo),
+  which **resolves Risk R9's licensing caveat**.
+- Self-hosted via vLLM in NVFP4 on the GX10 (~61GB weights); offline data-gen decouples its
+  memory from training (Risk R5). Same family as the 9B student → distribution match.
+- Optional frontier-API top-up for a small hard-trace seed, OFF by default.
+
+**4. Implications applied to the plan/code:**
+- `build_rl.verify_mode` tags every task execution|pattern; **M1 census gates on the
+  execution count** (the real RLVR supply) and reports the pattern count separately.
+- `reward.pattern_reward` rewards connector tasks by compile+clippy+similarity (no creds).
+- High-value CPT additions confirmed: `add_connector.md`, `connector-template/`, `docs/`,
+  `api-reference/` — the canonical domain patterns.
+- R9 (licensing) → RESOLVED via Apache-2.0 teacher. R4 (task supply) → sharpened: the
+  *execution* pool is the binding scarcity; pattern pool is large but execution-free.

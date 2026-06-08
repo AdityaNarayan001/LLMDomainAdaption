@@ -1,0 +1,18 @@
+{
+  "task_id": "hs-pr-4730",
+  "pr_number": 4730,
+  "parent_commit": "f0e1d2c3",
+  "issue_text": "euclid: routing rule with nested `and`/`or` evaluates incorrectly.",
+  "gold_files": [
+    "crates/euclid/src/frontend/ast.rs"
+  ],
+  "test_files": [
+    "crates/euclid/src/frontend/ast.rs"
+  ],
+  "crates": [
+    "euclid"
+  ],
+  "single_crate": true,
+  "verify_cmd": "cargo nextest run -p euclid",
+  "verify_mode": "execution"
+}

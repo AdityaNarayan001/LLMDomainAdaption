@@ -78,3 +78,37 @@ def execution_free_reward(candidate_patch: str, gold_patch: str) -> RewardBreakd
     """Cold-start / unbuildable: similarity of generated diff to the gold diff (SWE-RL)."""
     ratio = difflib.SequenceMatcher(None, candidate_patch, gold_patch).ratio()
     return RewardBreakdown(0, 0, ratio, 0, ratio, False, "execution_free")
+
+
+def pattern_reward(
+    workdir: Path,
+    package: str | None,
+    candidate_patch: str,
+    gold_patch: str | None,
+    tampered: bool,
+    weights: dict,
+    build_budget_s: int = 240,
+) -> RewardBreakdown:
+    """Reward for connector/integration tasks that CAN'T run cheap unit tests (no creds).
+
+    Uses the real cheap signals (fmt/clippy/compile) + patch-similarity to the gold diff
+    in place of the test signal. The test+dense budget is redirected to similarity so the
+    reward scale stays comparable to execution-mode tasks.
+    """
+    if tampered:
+        return RewardBreakdown(0, 0, 0, 0, 0.0, True, "pattern")
+    fmt = 1.0 if _ok(["cargo", "+nightly", "fmt", "--check"], workdir, 60) else 0.0
+    clippy = 1.0 if _ok(["cargo", "clippy", "--quiet"], workdir, build_budget_s) else 0.0
+    fmt_clippy = (fmt + clippy) / 2
+    compiles = _ok(["cargo", "check"] + (["-p", package] if package else []), workdir, build_budget_s)
+    compile_r = 1.0 if compiles else 0.0
+    sim = (
+        difflib.SequenceMatcher(None, candidate_patch, gold_patch).ratio()
+        if gold_patch else 0.0
+    )
+    total = (
+        weights["compile"] * compile_r
+        + weights["fmt_clippy"] * fmt_clippy
+        + (weights["tests"] + weights["dense"]) * sim   # similarity stands in for tests
+    )
+    return RewardBreakdown(fmt_clippy, compile_r, sim, 0.0, total, False, "pattern")

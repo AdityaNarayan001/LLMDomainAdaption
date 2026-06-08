@@ -138,5 +138,31 @@ def test_insights_lessons(monkeypatch, tmp_path):
     assert text.count("=== ") == 3   # one block per rollout
 
 
+def test_verify_mode_two_pools():
+    from src.data.build_rl import verify_mode
+
+    assert verify_mode({"euclid"}) == "execution"            # cheap unit tests, no creds
+    assert verify_mode({"common_utils", "euclid"}) == "execution"
+    assert verify_mode({"hyperswitch_connectors"}) == "pattern"   # needs live creds
+    assert verify_mode({"euclid", "hyperswitch_connectors"}) == "pattern"  # any non-cheap -> pattern
+    assert verify_mode(set()) == "pattern"
+
+
+def test_teacher_prompt_assembly():
+    from src.data.teacher import gold_grounded_prompt, oss_instruct_prompt
+
+    p = oss_instruct_prompt("crates/euclid/src/ast.rs", "fn eval() {}")
+    assert "crates/euclid/src/ast.rs" in p and "fn eval()" in p and "JSON" in p
+    assert "diff itself is the solution" in gold_grounded_prompt("x.rs", "code")
+
+
+def test_pattern_reward_tamper_zero(tmp_path):
+    from src.harness.reward import pattern_reward
+
+    w = {"tests": 1.0, "dense": 0.3, "compile": 0.1, "fmt_clippy": 0.05}
+    rb = pattern_reward(tmp_path, None, "cand", "gold", tampered=True, weights=w)
+    assert rb.total == 0.0 and rb.mode == "pattern"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

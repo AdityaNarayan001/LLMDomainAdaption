@@ -13,5 +13,6 @@
     "hyperswitch_connectors"
   ],
   "single_crate": true,
-  "verify_cmd": "cargo nextest run -p hyperswitch_connectors"
+  "verify_cmd": "cargo nextest run -p hyperswitch_connectors",
+  "verify_mode": "pattern"
 }

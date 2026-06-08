@@ -5,12 +5,11 @@ __pycache__/
 .ruff_cache/
 
 # Large / generated artifacts — NOT committed.
-# (ingested repo dump, tokenized corpora, trajectories)
-data/
-# (checkpoints, adapters)
-models/
-# (wandb / logs / per-cycle ledgers / rollouts / insight.txt)
-runs/
+# Leading slash = ROOT-ONLY, so these do NOT match src/data/, etc.
+# (no inline comments — git would treat them as part of the pattern)
+/data/
+/models/
+/runs/
 *.parquet
 *.bin
 *.safetensors

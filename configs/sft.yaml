@@ -16,6 +16,17 @@ data:
   general_replay_frac: 0.25       # 20-30% general instructions vs forgetting
   assistant_only_loss: true       # mask user/system/tool-observation tokens
 
+teacher:
+  # LOCKED: Qwen3.5-122B-A10B (MoE, ~10B active). Apache-2.0 => distilled outputs are
+  # license-clean to train on AND publish (public repo). Self-hosted via vLLM in NVFP4
+  # on the GX10 (~61GB weights). Same family as the 9B student (distribution match).
+  # Most SOLUTIONS come from repo gold (real connector code / PR diffs); the teacher
+  # mainly phrases instructions + reasoning -> minimal hallucination + licensing exposure.
+  model: "Qwen/Qwen3.5-122B-A10B"
+  endpoint: "http://localhost:8000"
+  mode: "offline"                 # generate -> dump -> then train (decouples memory, Risk R5)
+  frontier_api_topup: false       # optional small hard-trace seed; OFF by default (ToS/cost)
+
 hyperparams:
   lr: 2.0e-5
   lr_schedule: "cosine"

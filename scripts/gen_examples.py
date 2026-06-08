@@ -76,7 +76,20 @@ task = build_rl.RLTask(
     crates=["hyperswitch_connectors"],
     single_crate=True,
     verify_cmd="cargo nextest run -p hyperswitch_connectors",
+    verify_mode=build_rl.verify_mode({"hyperswitch_connectors"}),  # -> "pattern" (no cheap tests)
 )
 w("rl_task_example.jsonl", dataclasses.asdict(task))
+
+# also show an EXECUTION-verifiable task (cheap unit-test crate) for contrast
+exec_task = build_rl.RLTask(
+    task_id="hs-pr-4730", pr_number=4730, parent_commit="f0e1d2c3",
+    issue_text="euclid: routing rule with nested `and`/`or` evaluates incorrectly.",
+    gold_files=["crates/euclid/src/frontend/ast.rs"],
+    test_files=["crates/euclid/src/frontend/ast.rs"],
+    crates=["euclid"], single_crate=True,
+    verify_cmd="cargo nextest run -p euclid",
+    verify_mode=build_rl.verify_mode({"euclid"}),  # -> "execution" (cheap unit tests, no creds)
+)
+w("rl_task_execution_example.jsonl", dataclasses.asdict(exec_task))
 
 print("\nAll example records written to examples/ (committed as schema docs).")
