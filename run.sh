@@ -46,6 +46,9 @@ trap stop_vllm EXIT
 for v in .venv .venv-serve .venv-rl; do [ -x "$v/bin/python" ] || halt "missing venv $v — run ./setup.sh"; done
 [ -f "$HOME/.config/llmda/gh_token" ] && export GH_TOKEN="$(cat "$HOME/.config/llmda/gh_token")" \
   && echo ">>> GH_TOKEN loaded" || echo ">>> no GH_TOKEN — PR mining limited"
+# triton JIT (in vLLM init) needs Python.h at runtime; point at uv-managed CPython headers
+_HDR=$(find "$HOME/.local/share/uv/python" -name Python.h -path "*3.12*" 2>/dev/null | head -1)
+[ -n "$_HDR" ] && export CPATH="$(dirname "$_HDR"):${CPATH:-}" && echo ">>> CPATH set for triton JIT"
 
 # ---- 1. prep: download student + teacher (PREP_TEACHER=1) ----
 scripts/prep.sh || halt "prep failed"

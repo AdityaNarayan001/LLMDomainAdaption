@@ -5,9 +5,7 @@ source:
   default_branch: "main"
   # Pin a base commit so the warm build cache serves many tasks (Risk R6).
   base_commit: null            # filled in at M1 after the supply census picks a base
-
-paths:
-  raw_repo: "data/hyperswitch"
+  raw_repo: "data/hyperswitch" # local checkout (used by ingest_repos / build_cpt / build_rl)
   out_dir: "data/datasets"
 
 cpt:

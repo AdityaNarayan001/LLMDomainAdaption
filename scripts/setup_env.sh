@@ -25,15 +25,24 @@ make_venv () {  # name, extras  (idempotent: skip if the venv already works)
   "$dir/bin/python" -m pip install -e ".$extras"
 }
 
-install_verl () {  # veRL RL trainer in .venv-verl; .venv-rl -> it
+install_verl () {  # veRL RL trainer in .venv-verl; .venv-rl -> it. (Validated on GB10/aarch64.)
   if [ -x "$REPO_ROOT/.venv-rl/bin/python" ]; then echo "=== .venv-rl exists — skipping veRL ==="; return; fi
-  echo "=== veRL: .venv-verl + pip install verl (+ aarch64-skipped deps + our deps) ==="
+  command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="$HOME/.local/bin:$PATH"
+  echo "=== veRL: .venv-verl + verl + vllm (+ aarch64-skipped deps + our deps) ==="
   "$PYBIN" -m venv .venv-verl
   .venv-verl/bin/python -m pip install -q --upgrade pip
-  .venv-verl/bin/python -m pip install verl
-  .venv-verl/bin/python -m pip install -q $VERL_FIX $VERL_OUR_DEPS
+  .venv-verl/bin/python -m pip install verl vllm $VERL_FIX $VERL_OUR_DEPS ninja packaging wheel
+  # flash-attn is mandatory (veRL's bert_padding). Build for the local GPU arch with PTX.
+  # CPATH points at uv-managed CPython headers (Python.h) since system python3-dev may be absent.
+  uv python install 3.12 || true
+  local HDR=$(find "$HOME/.local/share/uv/python" -name Python.h -path "*3.12*" 2>/dev/null | head -1)
+  echo "=== building flash-attn (arch=${TORCH_CUDA_ARCH_LIST:-12.0+PTX}) — long, one-time ==="
+  CPATH="$(dirname "$HDR"):${CPATH:-}" MAX_JOBS="${MAX_JOBS:-16}" \
+    TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0+PTX}" \
+    .venv-verl/bin/python -m pip install flash-attn --no-build-isolation
   rm -rf "$REPO_ROOT/.venv-rl"; ln -s "$REPO_ROOT/.venv-verl" "$REPO_ROOT/.venv-rl"
-  .venv-rl/bin/python -c "import verl.trainer.main_ppo; import src.harness.reward; print('veRL RL env OK')"
+  .venv-rl/bin/python -c "import verl.trainer.main_ppo, flash_attn; import src.harness.reward; print('veRL RL env OK', flash_attn.__version__)"
 }
 
 case "${1:-all}" in
