@@ -26,7 +26,15 @@ export PREP_TEACHER="${PREP_TEACHER:-1}" MODEL TEACHER
 echo "================ run ${TS}  student=$MODEL teacher=$TEACHER ================"
 halt(){ echo ">>> HALT: $1"; stop_vllm; exit "${2:-1}"; }
 VLLM_PID=""
-stop_vllm(){ [ -n "$VLLM_PID" ] && kill "$VLLM_PID" 2>/dev/null && wait "$VLLM_PID" 2>/dev/null; VLLM_PID=""; echo ">>> vLLM stopped"; }
+stop_vllm(){ # kill the WHOLE vLLM tree — its spawned EngineCore workers don't die with the parent
+             # and would otherwise orphan ~100GB of unified memory (starving CPT/SFT next).
+  if [ -n "$VLLM_PID" ]; then
+    pkill -9 -P "$VLLM_PID" 2>/dev/null
+    kill -9 "$VLLM_PID" 2>/dev/null; wait "$VLLM_PID" 2>/dev/null
+  fi
+  pkill -9 -f "vllm.entrypoints.openai" 2>/dev/null   # sweep orphaned workers (safe: not in run.sh's cmdline)
+  VLLM_PID=""; sleep 4; echo ">>> vLLM stopped"
+}
 serve_model(){ # $1=model $2=quant ; (re)launch vLLM alone, health-wait
   stop_vllm
   local q=(); [ -n "$2" ] && q=(--quantization "$2")
@@ -35,7 +43,8 @@ serve_model(){ # $1=model $2=quant ; (re)launch vLLM alone, health-wait
   # bounds the Mamba-hybrid (Qwen3.5/Nemotron) state-cache so engine init doesn't fail.
   PATH="$PWD/.venv-serve/bin:$PATH" \
   .venv-serve/bin/python -m vllm.entrypoints.openai.api_server --model "$1" --port 8000 \
-      --max-num-seqs 256 "${q[@]}" > "runs/vllm_${TS}.log" 2>&1 &
+      --max-num-seqs 256 --gpu-memory-utilization 0.6 "${q[@]}" \
+      > "runs/vllm_${TS}.log" 2>&1 &
   VLLM_PID=$!
   for i in $(seq 1 120); do
     curl -sf "$ENDPOINT/v1/models" >/dev/null 2>&1 && { echo ">>> vLLM healthy ($1)"; return 0; }
