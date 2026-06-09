@@ -41,9 +41,11 @@ serve_model(){ # $1=model $2=quant ; (re)launch vLLM alone, health-wait
   echo ">>> serving $1 (${2:-bf16}) ..."
   # PATH must include the serve venv bin so flashinfer's JIT finds `ninja`; --max-num-seqs
   # bounds the Mamba-hybrid (Qwen3.5/Nemotron) state-cache so engine init doesn't fail.
+  # --max-model-len caps the model's huge native context (Qwen3.5 = 262144) so KV-cache fits
+  # at 0.6 util on the shared unified pool; 64K covers teacher prompts + student rollouts (<=16K).
   PATH="$PWD/.venv-serve/bin:$PATH" \
   .venv-serve/bin/python -m vllm.entrypoints.openai.api_server --model "$1" --port 8000 \
-      --max-num-seqs 256 --gpu-memory-utilization 0.6 "${q[@]}" \
+      --max-num-seqs 256 --gpu-memory-utilization 0.6 --max-model-len 65536 "${q[@]}" \
       > "runs/vllm_${TS}.log" 2>&1 &
   VLLM_PID=$!
   for i in $(seq 1 120); do
