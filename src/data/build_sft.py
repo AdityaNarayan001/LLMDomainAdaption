@@ -69,9 +69,9 @@ def build(cfg: dict) -> tuple[list[dict], list[dict]]:
                 r = json.loads(line)
             except json.JSONDecodeError:
                 skipped += 1; continue
-            # validate teacher output schema before trusting it. OSS-Instruct returns
-            # {problem, reasoning} and the code snippet IS the solution → derive it.
-            sol = r.get("solution") or r.get("snippet")
+            # OSS-Instruct: the answer is the REAL code snippet from the repo — never the
+            # teacher's invented "solution" field (that risks hallucinated training targets).
+            sol = r.get("snippet") or r.get("solution")
             if not (str(r.get("snippet", "")).strip() and str(r.get("problem", "")).strip()
                     and str(sol).strip()):
                 skipped += 1; continue

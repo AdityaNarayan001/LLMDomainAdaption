@@ -24,7 +24,8 @@ teacher:
   model: "Qwen/Qwen3.5-27B"       # dense 27B, served bf16 (~54GB); evaluated 122B-A10B (too big
                                   # to serve) and Nemotron-3-Nano-30B NVFP4 (lighter) — chose 27B for code
   endpoint: "http://localhost:8000"
-  concurrency: 32                 # in-flight teacher requests; vLLM continuous-batches them (~32x faster)
+  concurrency: 64                 # in-flight teacher requests; vLLM continuous-batches them
+  n_instructions: 1000            # quality >> quantity (LIMA): ~1000 grounded instructions suffice
   mode: "offline"                 # generate -> dump -> then train (decouples memory, Risk R5)
   frontier_api_topup: false       # optional small hard-trace seed; OFF by default (ToS/cost)
 

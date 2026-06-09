@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -126,6 +127,23 @@ def build_phase2(cfg: dict, max_commits: int = 5000):
         yield Packed(training_content=content, meta={"sha": sha, "phase": "evolution"})
 
 
+_TEMPLATE_CHECKLIST = re.compile(r"^\s*-\s*\[[ xX]\]")          # "- [ ] Bugfix" template items
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)                  # "<!-- Put an x ... -->"
+
+
+def strip_pr_template(body: str) -> str:
+    """Remove hyperswitch's PR-template boilerplate (HTML comments + checklist items + the
+    empty '## Type of Change'/'## Checklist' scaffolding) so only real prose survives.
+    Garbage-in-garbage-out: the checklists teach nothing and dilute the signal."""
+    body = _HTML_COMMENT.sub("", body or "")
+    kept = [ln for ln in body.splitlines() if not _TEMPLATE_CHECKLIST.match(ln)]
+    text = "\n".join(kept)
+    text = re.sub(r"\n{3,}", "\n\n", text)                       # collapse runs of blank lines
+    # drop now-empty boilerplate headers
+    text = re.sub(r"(?m)^#+\s*(Type of Change|Checklist|Motivation and Context)\s*$\n?", "", text)
+    return text.strip()
+
+
 def build_phase3(cfg: dict):
     """PR Mastery: intent (issue/PR body) -> change -> review discussion (streamed)."""
     prs_path = config.ROOT / "data/datasets/github_prs.jsonl"
@@ -133,8 +151,11 @@ def build_phase3(cfg: dict):
         return  # run ingest_github first
     for line in prs_path.read_text().splitlines():
         pr = json.loads(line)
+        body = strip_pr_template(pr["body"])
+        if len(body) < 40:
+            continue  # template-only PR with no real description — skip (no signal)
         content = (
-            f"# PR #{pr['number']}: {pr['title']}\n\n{pr['body']}\n\n"
+            f"# PR #{pr['number']}: {pr['title']}\n\n{body}\n\n"
             f"# Files changed\n" + "\n".join(pr["changed_files"])
         )
         yield Packed(training_content=content, meta={"pr": pr["number"], "phase": "pr_mastery"})

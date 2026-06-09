@@ -6,11 +6,16 @@ assistant-only loss mask. Includes the overfit guard (perplexity regression vs C
 from __future__ import annotations
 
 import subprocess
+import sys
+from pathlib import Path
 
 import yaml
 
 from src import config
 from src.eval import perplexity
+
+# axolotl CLI next to the running interpreter (.venv/bin/axolotl); bare name isn't on PATH
+AXOLOTL = str(Path(sys.executable).with_name("axolotl"))
 
 
 def axolotl_config(cfg: dict, cpt_ckpt: str, out_dir: str = "models/sft") -> dict:
@@ -52,7 +57,7 @@ def run(dry_run: bool = False, cpt_ckpt: str = "models/cpt/pr_mastery",
     print(f"[SFT] -> {cfg_path}  (out_dir={out_dir})")
     if dry_run:
         return
-    subprocess.run(["axolotl", "train", str(cfg_path)], check=True)
+    subprocess.run([AXOLOTL, "train", str(cfg_path)], check=True)
 
     # overfit guard (decision: SFT quality gates everything downstream)
     heldout = "data/datasets/cpt_heldout.jsonl"

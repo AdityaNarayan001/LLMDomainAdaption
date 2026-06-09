@@ -7,11 +7,16 @@ adapter carry-over (design from Phased-CPT). Emits one Axolotl run per phase.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
 
 from src import config
+
+# Resolve the axolotl CLI next to the running interpreter (.venv/bin/axolotl) — run.sh invokes
+# the venv python directly without activating, so the bare name isn't on PATH.
+AXOLOTL = str(Path(sys.executable).with_name("axolotl"))
 
 
 def axolotl_config_for_phase(cfg: dict, phase: dict, prev_ckpt: str | None) -> dict:
@@ -68,7 +73,7 @@ def run(dry_run: bool = False) -> None:
         cfg_path.write_text(yaml.safe_dump(ax))
         print(f"[CPT] phase={phase['name']} -> {cfg_path}")
         if not dry_run:
-            subprocess.run(["axolotl", "train", str(cfg_path)], check=True)
+            subprocess.run([AXOLOTL, "train", str(cfg_path)], check=True)
         prev = ax["output_dir"]
 
 

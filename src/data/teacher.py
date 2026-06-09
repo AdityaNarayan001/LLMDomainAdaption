@@ -65,12 +65,25 @@ def _extract_json(text: str) -> dict:
         return json.loads(m.group(0))
 
 
+# Strict schema: forces EXACTLY {problem, reasoning} so the teacher can't ramble a long
+# `solution` block that overruns max_tokens and truncates the JSON (the cause of ~31% skips).
+_INSTR_SCHEMA = {
+    "type": "object",
+    "properties": {"problem": {"type": "string"}, "reasoning": {"type": "string"}},
+    "required": ["problem", "reasoning"],
+    "additionalProperties": False,
+}
+
+
 def _call_teacher(endpoint: str, model: str, prompt: str, temperature: float = 0.7) -> str:
     resp = requests.post(
         f"{endpoint}/v1/chat/completions",
         json={"model": model, "messages": [{"role": "user", "content": prompt}],
               "temperature": temperature, "max_tokens": 1500,
-              "response_format": {"type": "json_object"}},
+              # json_schema (vLLM structured outputs) guarantees valid, bounded JSON
+              "response_format": {"type": "json_schema",
+                                  "json_schema": {"name": "instruction", "schema": _INSTR_SCHEMA,
+                                                  "strict": True}}},
         timeout=300,
     )
     resp.raise_for_status()
@@ -106,15 +119,34 @@ def sample_function_snippets(cfg: dict, n: int, seed: int = 0) -> list[tuple[str
 
 
 def generate(cfg: dict, teacher_cfg: dict, n: int = 2000, concurrency: int | None = None) -> int:
-    """Query the teacher over sampled snippets -> sft_instructions_raw.jsonl. Returns count.
-    Sends `concurrency` requests in flight at once — vLLM continuous-batches them, so this is
-    ~concurrency× faster than serial. Results are still written incrementally (crash-safe);
-    the single writer is the main thread (as_completed), so no write lock needed."""
+    """Generate up to `n` instructions into sft_instructions_raw.jsonl. RESUMABLE + self-topping:
+    counts what's already there and only generates the SHORTFALL (appends), skipping snippets
+    already used — so re-running fills the gap from failed/skipped generations until it hits `n`.
+    Sends `concurrency` requests in flight (vLLM continuous-batches); over-samples candidates to
+    absorb any parse failures and cancels the excess once the target is met."""
     endpoint, model = teacher_cfg["endpoint"], teacher_cfg["model"]
     concurrency = concurrency or int(teacher_cfg.get("concurrency", 32))
     out = config.ROOT / "data/datasets/sft_instructions_raw.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
-    snippets = sample_function_snippets(cfg, n)
+
+    existing: list[dict] = []
+    if out.exists():
+        for ln in out.read_text().splitlines():
+            try:
+                existing.append(json.loads(ln))
+            except json.JSONDecodeError:
+                pass
+    done = {r.get("snippet") for r in existing}
+    have = len(existing)
+    if have >= n:
+        print(f"  already have {have} >= {n} instructions — nothing to top up", flush=True)
+        return have
+    need = n - have
+    print(f"  resuming: have {have}, need {need} more (target {n})", flush=True)
+
+    # candidate pool excluding already-done snippets; over-sample to absorb failures
+    pool = sample_function_snippets(cfg, max(n * 2, need * 3))
+    cands = [(p, s) for p, s in pool if s not in done][: int(need * 1.6) + concurrency]
 
     def _one(path: str, snippet: str) -> dict:
         raw = _call_teacher(endpoint, model, oss_instruct_prompt(path, snippet))
@@ -122,22 +154,26 @@ def generate(cfg: dict, teacher_cfg: dict, n: int = 2000, concurrency: int | Non
         rec["snippet"] = snippet
         return rec
 
-    written = 0
-    with out.open("w") as f, ThreadPoolExecutor(max_workers=concurrency) as ex:
-        futs = [ex.submit(_one, p, s) for p, s in snippets]
-        for fut in as_completed(futs):
-            try:
-                rec = fut.result()
-            except Exception:  # pragma: no cover - network/parse dependent
-                continue
-            f.write(json.dumps(rec) + "\n")
-            f.flush()                            # crash-safe: persisted as each completes
-            written += 1
-            if written % 50 == 0:
-                print(f"  generated {written}/{len(snippets)} instructions ({concurrency}x) -> {out.name}",
-                      flush=True)
-    print(f"  generated {written} instructions ({concurrency}-way concurrent) -> {out.name}", flush=True)
-    return written
+    ex = ThreadPoolExecutor(max_workers=concurrency)
+    futs = [ex.submit(_one, p, s) for p, s in cands]
+    try:
+        with out.open("a") as f:                 # APPEND — preserve existing, top up to n
+            for fut in as_completed(futs):
+                if have >= n:
+                    break
+                try:
+                    rec = fut.result()
+                except Exception:  # pragma: no cover - network/parse dependent
+                    continue
+                f.write(json.dumps(rec) + "\n")
+                f.flush()                        # crash-safe: persisted as each completes
+                have += 1
+                if have % 50 == 0:
+                    print(f"  generated {have}/{n} instructions ({concurrency}x) -> {out.name}", flush=True)
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)   # cancel the over-sampled extras
+    print(f"  {have}/{n} instructions ({concurrency}-way concurrent) -> {out.name}", flush=True)
+    return have
 
 
 def gen_trajectories(endpoint: str, model: str, weights: dict, n_tasks: int = 200,

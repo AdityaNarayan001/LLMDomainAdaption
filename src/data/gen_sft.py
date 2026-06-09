@@ -24,8 +24,9 @@ def run() -> None:
     endpoint, model = tcfg["endpoint"], tcfg["model"]
     weights = config.load("rl")["reward"]["weights"]
 
-    print(f"[gen_sft] instructions via teacher={model} @ {endpoint}")
-    n_instr = teacher.generate(data_cfg, tcfg, n=2000)
+    n_target = int(tcfg.get("n_instructions", 1000))   # quality >> quantity; configurable
+    print(f"[gen_sft] instructions via teacher={model} @ {endpoint} (n={n_target})")
+    n_instr = teacher.generate(data_cfg, tcfg, n=n_target)
     print(f"[gen_sft] {n_instr} raw instructions")
 
     print("[gen_sft] trajectories via harness rollouts (rejection-sampled to successes)")

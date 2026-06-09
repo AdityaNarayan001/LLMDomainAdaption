@@ -12,6 +12,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 
 from src import config
+from src.data.build_cpt import strip_pr_template
 
 CRATE_RE = re.compile(r"^crates/([^/]+)/")
 
@@ -53,6 +54,8 @@ class RLTask:
     single_crate: bool
     verify_cmd: str            # targeted cargo nextest for cheap verification
     verify_mode: str           # "execution" (cheap unit tests) | "pattern" (compile+similarity)
+    setup_patch: str | None = None   # regression to inject before the model fixes it (synthetic
+                                     # bug-injection tasks); None for real PRs (parent_commit IS broken)
 
 
 def parent_of(repo, merge_commit: str | None) -> str | None:
@@ -83,7 +86,7 @@ def iter_tasks(cfg: dict):
             task_id=f"hs-pr-{pr['number']}",
             pr_number=pr["number"],
             parent_commit=parent_of(repo, pr["merge_commit"]),
-            issue_text=(pr["title"] + "\n\n" + pr["body"]),
+            issue_text=(pr["title"] + "\n\n" + strip_pr_template(pr["body"])),
             gold_files=pr["changed_files"],
             test_files=pr["test_files"],
             crates=sorted(touched),
