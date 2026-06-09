@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -104,25 +105,38 @@ def sample_function_snippets(cfg: dict, n: int, seed: int = 0) -> list[tuple[str
     return out
 
 
-def generate(cfg: dict, teacher_cfg: dict, n: int = 2000) -> int:
-    """Query the teacher over sampled snippets -> sft_instructions_raw.jsonl. Returns count."""
+def generate(cfg: dict, teacher_cfg: dict, n: int = 2000, concurrency: int | None = None) -> int:
+    """Query the teacher over sampled snippets -> sft_instructions_raw.jsonl. Returns count.
+    Sends `concurrency` requests in flight at once — vLLM continuous-batches them, so this is
+    ~concurrency× faster than serial. Results are still written incrementally (crash-safe);
+    the single writer is the main thread (as_completed), so no write lock needed."""
     endpoint, model = teacher_cfg["endpoint"], teacher_cfg["model"]
+    concurrency = concurrency or int(teacher_cfg.get("concurrency", 32))
     out = config.ROOT / "data/datasets/sft_instructions_raw.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
+    snippets = sample_function_snippets(cfg, n)
+
+    def _one(path: str, snippet: str) -> dict:
+        raw = _call_teacher(endpoint, model, oss_instruct_prompt(path, snippet))
+        rec = _extract_json(raw)                 # skip-on-parse-error = teacher-output validation
+        rec["snippet"] = snippet
+        return rec
+
     written = 0
-    with out.open("w") as f:
-        for path, snippet in sample_function_snippets(cfg, n):
+    with out.open("w") as f, ThreadPoolExecutor(max_workers=concurrency) as ex:
+        futs = [ex.submit(_one, p, s) for p, s in snippets]
+        for fut in as_completed(futs):
             try:
-                raw = _call_teacher(endpoint, model, oss_instruct_prompt(path, snippet))
-                rec = _extract_json(raw)         # skip-on-parse-error = teacher-output validation
-                rec["snippet"] = snippet
-                f.write(json.dumps(rec) + "\n")
-                f.flush()                        # crash-safe: each teacher call persisted
-                written += 1
-                if written % 50 == 0:
-                    print(f"  generated {written} instructions -> {out.name}", flush=True)
+                rec = fut.result()
             except Exception:  # pragma: no cover - network/parse dependent
                 continue
+            f.write(json.dumps(rec) + "\n")
+            f.flush()                            # crash-safe: persisted as each completes
+            written += 1
+            if written % 50 == 0:
+                print(f"  generated {written}/{len(snippets)} instructions ({concurrency}x) -> {out.name}",
+                      flush=True)
+    print(f"  generated {written} instructions ({concurrency}-way concurrent) -> {out.name}", flush=True)
     return written
 
 
