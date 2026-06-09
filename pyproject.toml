@@ -28,6 +28,8 @@ train = [
     "peft>=0.12",
     "accelerate>=0.33",
     "bitsandbytes>=0.43",   # 8-bit paged optimizer + NF4 QLoRA fallback
+    "torchao>=0.5",         # axolotl pulls this for low-bit optim/quant paths
+    "flash-linear-attention>=0.1",  # Qwen3.5 is Mamba-hybrid: packed seqs need fla causal_conv1d
     "axolotl>=0.6",         # CPT/SFT trainer
     "wandb>=0.17",
 ]

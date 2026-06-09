@@ -16,7 +16,7 @@ cd "$(dirname "$0")"
 TS="$(date +%Y%m%d_%H%M%S)"; mkdir -p runs
 LOG="runs/pipeline_${TS}.log"; exec > >(tee -a "$LOG") 2>&1
 
-MODEL="${MODEL:-Qwen/Qwen3.5-9B}"
+MODEL="${MODEL:-Qwen/Qwen2.5-Coder-7B}"
 TEACHER="${TEACHER:-Qwen/Qwen3.5-27B}"
 ENDPOINT="${ENDPOINT:-http://localhost:8000}"
 CYCLES="${CYCLES:-1000}"; CENSUS_VERIFY="${CENSUS_VERIFY:-25}"

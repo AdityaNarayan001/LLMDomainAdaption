@@ -1,5 +1,8 @@
-# Stage 2 — Continued Pre-Training. Knowledge injection -> full FT (8-bit paged AdamW) on the 9B.
-base_model: "Qwen/Qwen3.5-9B"     # 4B for fast iteration: "Qwen/Qwen3.5-4B"
+# Stage 2 — Continued Pre-Training. Knowledge injection -> full FT (8-bit paged AdamW).
+# Student = Qwen2.5-Coder-7B (DENSE, code-specialized). Switched from Qwen3.5-9B because the
+# latter is a Mamba-hybrid whose fla/TileLang training kernels don't compile on the GB10 (sm_121a);
+# dense trains cleanly with flash-attn and is better suited to the Rust/hyperswitch code goal.
+base_model: "Qwen/Qwen2.5-Coder-7B"
 trainer: "axolotl"
 
 method:
@@ -19,9 +22,10 @@ embeddings:
 
 curriculum:                       # design adapted from Phased-CPT
   phases:
-    - { name: foundation, data: "data/datasets/cpt_phase1.jsonl", epochs: 3 }
-    - { name: evolution,  data: "data/datasets/cpt_phase2.jsonl", epochs: 2 }
-    - { name: pr_mastery, data: "data/datasets/cpt_phase3.jsonl", epochs: 2 }
+    # MVP fast pass: 1 epoch/phase (full quality = 3/2/2, restore when scaling out)
+    - { name: foundation, data: "data/datasets/cpt_phase1.jsonl", epochs: 1 }
+    - { name: evolution,  data: "data/datasets/cpt_phase2.jsonl", epochs: 1 }
+    - { name: pr_mastery, data: "data/datasets/cpt_phase3.jsonl", epochs: 1 }
   load_previous_adapter: true     # anti-forgetting
 
 hyperparams:
@@ -30,7 +34,7 @@ hyperparams:
   warmup_ratio: 0.05
   micro_batch_size: 1
   gradient_accumulation: 16
-  max_seq_len: 16384
+  max_seq_len: 4096               # MVP fast pass (full = 16384); ~4x faster steps + less memory
   bf16: true                      # NVFP4 training is prototype; train in bf16 (decision #13)
   weight_decay: 0.1
 

@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-MODEL="${MODEL:-Qwen/Qwen3.5-9B}"
+MODEL="${MODEL:-Qwen/Qwen2.5-Coder-7B}"
 TEACHER="${TEACHER:-Qwen/Qwen3.5-27B}"
 
 ensure_model () {  # idempotent: snapshot_download skips already-cached files

@@ -35,8 +35,8 @@ hyperparams:
   warmup_ratio: 0.05
   micro_batch_size: 4
   gradient_accumulation: 8
-  epochs: 2
-  max_seq_len: 16384
+  epochs: 1                       # MVP fast pass (full = 2)
+  max_seq_len: 4096               # MVP fast pass (full = 16384)
 
 overfit_guard:
   max_perplexity_regression_pct: 5.0   # vs CPT; a weak/overfit SFT gates everything downstream
