@@ -56,6 +56,14 @@ class RLTask:
     verify_mode: str           # "execution" (cheap unit tests) | "pattern" (compile+similarity)
     setup_patch: str | None = None   # regression to inject before the model fixes it (synthetic
                                      # bug-injection tasks); None for real PRs (parent_commit IS broken)
+    gold_patch: str | None = None    # the PR's real diff — REQUIRED for pattern-mode similarity
+                                     # reward (without it pattern reward is silently capped at 0.15)
+    fail_to_pass: list[str] = None   # type: ignore[assignment]  # nextest ids that flip FAIL->PASS;
+                                     # empty until mined (census M1) — execution mode needs them
+
+    def __post_init__(self):
+        if self.fail_to_pass is None:
+            self.fail_to_pass = []
 
 
 def parent_of(repo, merge_commit: str | None) -> str | None:
@@ -66,6 +74,24 @@ def parent_of(repo, merge_commit: str | None) -> str | None:
         capture_output=True, text=True, check=False,
     )
     return res.stdout.strip() or None
+
+
+_GOLD_PATCH_CAP = 200_000  # bytes; beyond this the diff is too big to be a useful similarity target
+
+
+def gold_patch_of(repo, merge_commit: str | None) -> str | None:
+    """The PR's real diff (merge commit vs its first parent) — the pattern-mode similarity
+    target. Without this every pattern task's similarity term is 0 and reward caps at 0.15."""
+    if not merge_commit:
+        return None
+    res = subprocess.run(
+        ["git", "-C", str(repo), "show", "--format=", "--unified=3", merge_commit],
+        capture_output=True, text=True, check=False,
+    )
+    diff = res.stdout
+    if not diff or len(diff) > _GOLD_PATCH_CAP:
+        return None
+    return diff
 
 
 def iter_tasks(cfg: dict):
@@ -82,6 +108,10 @@ def iter_tasks(cfg: dict):
         single = len(touched) == 1
         crate = next(iter(touched)) if touched else None
         verify = f"cargo nextest run -p {crate}" if single and crate else "cargo nextest run"
+        # Real-PR tasks route to PATTERN mode until FAIL_TO_PASS test ids are actually mined
+        # (the PR's tests are ADDED by the PR — they don't exist at parent, so execution mode
+        # has no signal and silently caps at 0.15). Pattern mode + gold_patch gives the full
+        # similarity reward today; flip back via verify_mode(touched) once fail_to_pass exists.
         yield RLTask(
             task_id=f"hs-pr-{pr['number']}",
             pr_number=pr["number"],
@@ -92,7 +122,8 @@ def iter_tasks(cfg: dict):
             crates=sorted(touched),
             single_crate=single,
             verify_cmd=verify,
-            verify_mode=verify_mode(touched),
+            verify_mode="pattern",
+            gold_patch=gold_patch_of(repo, pr["merge_commit"]),
         )
 
 
@@ -111,12 +142,23 @@ def save(tasks: list[RLTask], path: str = "data/datasets/rl_tasks.jsonl") -> int
 
 
 def build_and_save(cfg: dict, path: str = "data/datasets/rl_tasks.jsonl", batch: int = 10) -> tuple[int, int]:
-    """Stream tasks to `path`, flushing every `batch` — crash-safe + visible progress."""
+    """Stream tasks to `path`, flushing every `batch` — crash-safe + visible progress.
+
+    PRESERVES synthetic bug-injection tasks (task_id hs-mut-*): they are appended later by
+    build_rl_synthetic, and a naive "w" rewrite here would silently wipe them on re-run."""
     out = config.ROOT / path
     out.parent.mkdir(parents=True, exist_ok=True)
+    synthetic: list[str] = []
+    if out.exists():
+        synthetic = [ln for ln in out.read_text().splitlines()
+                     if ln.strip() and json.loads(ln).get("task_id", "").startswith("hs-mut-")]
     total = single_n = 0
     buf: list[RLTask] = []
     with out.open("w") as f:
+        for ln in synthetic:                       # carry the synthetic tasks across the rewrite
+            f.write(ln + "\n")
+        if synthetic:
+            print(f"  preserved {len(synthetic)} synthetic (hs-mut-*) tasks", flush=True)
         for t in iter_tasks(cfg):
             buf.append(t); total += 1; single_n += int(t.single_crate)
             if len(buf) >= batch:

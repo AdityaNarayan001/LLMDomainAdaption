@@ -28,9 +28,10 @@ case "$stage" in
   eval)     "$PY" -m src.eval.run_eval "$@" ;;        # baseline/per-stage held-out perplexity
   cpt)      "$PY" -m src.train.cpt "$@" ;;
   sft)      "$PY" -m src.train.sft "$@" ;;
+  merge)    "$PY" -m src.train.merge_student "$@" ;;  # CPT+SFT LoRA -> models/student_merged
   serve)    "$PY" -m vllm.entrypoints.openai.api_server "$@" ;;        # .venv-serve
   rl)       "$PY" -m src.train.rl "$@" ;;                              # .venv-rl
   flywheel) "$PY" -m src.orchestrate.flywheel "$@" ;;                  # .venv (shells out to others)
   smoke)    "$PY" -m pytest tests/ -q ;;
-  help|*)   echo "stages: ingest | census | data | cpt | sft | serve | rl | flywheel | smoke"; exit 1 ;;
+  help|*)   echo "stages: ingest | census | data | cpt | sft | merge | serve | rl | flywheel | smoke"; exit 1 ;;
 esac

@@ -13,8 +13,10 @@ from src import config
 
 
 def _fingerprint(rollout: dict) -> str:
-    # fingerprint the assistant edits (rough: concat assistant contents)
-    blob = "".join(m.get("content", "") for m in rollout["messages"] if m["role"] == "assistant")
+    # fingerprint the assistant edits (rough: concat assistant contents).
+    # `or ""`: tool-calling assistant turns carry content=None (the key EXISTS, so
+    # .get(k, "") returns None) — the first successful tool-using rollout would TypeError.
+    blob = "".join((m.get("content") or "") for m in rollout["messages"] if m["role"] == "assistant")
     return hashlib.sha256(blob.encode("utf-8", "ignore")).hexdigest()[:16]
 
 

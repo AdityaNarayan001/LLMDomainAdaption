@@ -17,7 +17,15 @@ from dataclasses import asdict, dataclass
 from src import config
 from src.data import build_rl
 
-GATE_MIN_TASKS = 150  # plan M1: < this => re-scope RL around synthetic + execution-free
+def _gate_min() -> int:
+    """Census floor — configurable (flywheel.yaml: census_min_tasks). The plan's M1 default was
+    150 real-PR tasks; with the R4 rescope (synthetic bug-injection + pattern/execution-free
+    reward) a much smaller execution-verifiable core is viable, so the floor must be tunable
+    rather than a hardcoded constant that permanently NO-GOs Phase C."""
+    try:
+        return int(config.load("flywheel").get("census_min_tasks", 150))
+    except Exception:
+        return 150
 
 
 @dataclass
@@ -36,8 +44,27 @@ class Census:
     note: str
 
 
+def _load_task_pool(cfg: dict) -> list:
+    """The REAL task pool = data/datasets/rl_tasks.jsonl (mined PRs + appended synthetic
+    bug-injection tasks). Rebuilding from PRs here would silently exclude the synthetic
+    execution tasks — the very pool the gate is supposed to measure. Falls back to a
+    fresh build only when the file doesn't exist yet."""
+    pool = config.ROOT / "data/datasets/rl_tasks.jsonl"
+    if pool.exists():
+        out = []
+        for ln in pool.read_text().splitlines():
+            try:
+                d = json.loads(ln)
+            except json.JSONDecodeError:
+                continue
+            known = {f.name for f in __import__("dataclasses").fields(build_rl.RLTask)}
+            out.append(build_rl.RLTask(**{k: v for k, v in d.items() if k in known}))
+        return out
+    return build_rl.build(cfg)
+
+
 def run(cfg: dict, verify_sample: int = 0) -> Census:
-    tasks = build_rl.build(cfg)
+    tasks = _load_task_pool(cfg)
     single = [t for t in tasks if t.single_crate]
     # the gate cares about EXECUTION-verifiable tasks (cheap unit tests, no creds) — the
     # real RLVR pool. Connector/integration tasks ("pattern") verify by compile+similarity.
@@ -63,7 +90,8 @@ def run(cfg: dict, verify_sample: int = 0) -> Census:
 
     repro_rate = (verified_ok / verified_n) if verified_n else 1.0
     est_total = int(len(execution) * repro_rate)
-    passes = est_total >= GATE_MIN_TASKS
+    gate_min = _gate_min()
+    passes = est_total >= gate_min
 
     return Census(
         total_prs_with_tests=len(tasks),
@@ -75,11 +103,11 @@ def run(cfg: dict, verify_sample: int = 0) -> Census:
         verified_sample=verified_n,
         verified_reproducible=verified_ok,
         estimated_reproducible_total=est_total,
-        gate_min=GATE_MIN_TASKS,
+        gate_min=gate_min,
         passes_gate=passes,
         note=(
-            f"GO: {est_total} execution-verifiable RL tasks (>= {GATE_MIN_TASKS})." if passes else
-            f"NO-GO: only ~{est_total} execution-verifiable tasks (< {GATE_MIN_TASKS}). "
+            f"GO: {est_total} execution-verifiable RL tasks (>= {gate_min})." if passes else
+            f"NO-GO: only ~{est_total} execution-verifiable tasks (< {gate_min}). "
             f"Lean RL on the {len(pattern)} pattern tasks via compile+clippy+patch-similarity "
             f"(execution-free) + synthetic connector tasks; reframe the headline claim."
         ),

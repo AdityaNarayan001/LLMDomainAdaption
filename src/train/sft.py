@@ -41,11 +41,13 @@ def axolotl_config(cfg: dict, cpt_ckpt: str, out_dir: str = "models/sft") -> dic
     for path in (cfg["data"]["trajectories"], cfg["data"]["instructions"]):
         p = config.ROOT / path
         if p.exists() and p.stat().st_size > 0:
-            datasets.append({"path": path, "type": "chat_template", "train_on_inputs": False})
+            datasets.append({"path": path, "type": "chat_template"})
     if not datasets:
         raise SystemExit("[SFT] no non-empty SFT datasets — run gen_sft first")
     return {
         "base_model": cpt_ckpt,                       # stack on CPT
+        # assistant-only loss mask: top-level Axolotl key (inside the dataset dict it's ignored)
+        "train_on_inputs": False,
         "adapter": "qlora" if cfg["method"]["qlora"] else "lora",
         "lora_r": lora["r"], "lora_alpha": lora["alpha"], "lora_dropout": lora["dropout"],
         "lora_target_modules": lora["target_modules"],
@@ -78,7 +80,8 @@ def run(dry_run: bool = False, cpt_ckpt: str = "models/cpt/pr_mastery",
     print(f"[SFT] -> {cfg_path}  (out_dir={out_dir})")
     if dry_run:
         return
-    subprocess.run([AXOLOTL, "train", str(cfg_path)], check=True, env=_VENV_ENV)
+    subprocess.run([AXOLOTL, "train", str(cfg_path)], check=True, env=_VENV_ENV,
+                   cwd=str(config.ROOT))  # emitted YAML uses ROOT-relative paths
 
     # overfit guard (decision: SFT quality gates everything downstream)
     heldout = "eval_sets/heldout_code.jsonl"

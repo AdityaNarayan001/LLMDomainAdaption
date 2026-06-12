@@ -28,9 +28,10 @@ rollout:
   engine: "vllm"
   samples_per_task: 8
   temperature: 1.0
-  max_turns: 40
-  max_tokens: 16384
-  weight_sync: "adapter_hotload"  # sync updated LoRA into vLLM workers each step
+  max_turns: 40                   # doc-only today (single-turn RLVR); used by the multi-turn upgrade
+  max_tokens: 2048                # single-turn diff generation — 16K was sized for multi-turn
+                                  # agentic rollouts and blew the GB10 step-memory peak
+  weight_sync: "adapter_hotload"  # doc-only: veRL handles its own weight sync
 
 reward:
   # tiered, short-circuiting cheap->expensive (see harness/reward.py)

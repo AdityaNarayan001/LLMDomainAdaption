@@ -28,15 +28,31 @@ def _rows() -> list[dict]:
     return [json.loads(ln) for ln in CURVE.read_text().splitlines() if ln.strip()]
 
 
-def run(model: str, tag: str, heldout: str = HELDOUT, max_samples: int = 300) -> dict:
+def _weights_fp(model: str) -> str:
+    """Cheap weights fingerprint (newest safetensors mtime) so a RETRAIN to the same path
+    isn't silently skipped as 'already evaluated' — the old (tag, path) key kept stale rows."""
+    p = config.ROOT / model
+    if not p.is_dir():
+        return "hub"
+    mt = max((f.stat().st_mtime for f in p.glob("*.safetensors")), default=0.0)
+    return str(int(mt))
+
+
+def run(model: str, tag: str, heldout: str = HELDOUT, max_samples: int = 300,
+        force: bool = False) -> dict:
     if not (config.ROOT / heldout).exists():
-        print(f"[eval] no held-out set at {heldout} (build_cpt writes it) — skipping {tag}")
+        print(f"[eval] WARN: NO LEARNING-CURVE ROW for '{tag}' — held-out set missing at "
+              f"{heldout} (build_cpt writes it). The stage comparison will be incomplete.")
         return {}
-    if any(r.get("tag") == tag and r.get("model") == model for r in _rows()):
-        print(f"[eval] {tag} ({model}) already in learning curve — skipping re-eval")
+    fp = _weights_fp(model)
+    if not force and any(r.get("tag") == tag and r.get("model") == model
+                         and r.get("weights_fp", fp) == fp for r in _rows()):
+        print(f"[eval] {tag} ({model}, same weights) already in learning curve — skipping "
+              "(--force to re-eval)")
         return {}
     ppl = perplexity.perplexity(model, heldout, max_samples=max_samples)
-    row = {"tag": tag, "model": model, "perplexity": round(ppl, 4), "ts": int(time.time())}
+    row = {"tag": tag, "model": model, "perplexity": round(ppl, 4), "weights_fp": fp,
+           "ts": int(time.time())}
     CURVE.parent.mkdir(parents=True, exist_ok=True)
     base = next((r for r in _rows() if r["tag"] == "base"), None)
     with CURVE.open("a") as f:
@@ -55,5 +71,6 @@ if __name__ == "__main__":
     ap.add_argument("--tag", required=True)
     ap.add_argument("--heldout", default=HELDOUT)
     ap.add_argument("--max-samples", type=int, default=300)
+    ap.add_argument("--force", action="store_true", help="re-eval even if a row exists")
     a = ap.parse_args()
-    run(a.model, a.tag, a.heldout, a.max_samples)
+    run(a.model, a.tag, a.heldout, a.max_samples, force=a.force)

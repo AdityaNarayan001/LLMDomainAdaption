@@ -16,15 +16,19 @@ cpt:
   dependency_ordered: true     # topological order from Cargo.toml workspace deps
   file_marker: "// File: {path}\n"
   fim_rate: 0.5                # PSM+SPM
-  chunk_overlap_tokens: 2048
+  chunk_overlap_tokens: 2048   # DOC-ONLY: no chunking is implemented — whole files are single
+                               # samples (trainer truncates at sequence_len); wire or accept
   dedup_jaccard: 0.70          # MinHash/LSH near-dedup
-  rust_upsample: 1.0
-  general_replay_frac: 0.08    # 5-10% general code/text to fight forgetting
+  rust_upsample: 1.0           # DOC-ONLY: upsampling not implemented
+  general_replay_frac: 0.08    # DOC-ONLY: replay mixing not implemented (anti-forgetting is
+                               # currently the curriculum carry-over only)
   heldout_frac: 0.15           # split BY crate/file; decontaminate vs HS-bench
 
 github:
   # gh CLI / REST. Used by both Stage 1 (RL tasks) and Stage 0b (eval set).
   per_page: 100
+  # DOC-ONLY below: ingest_github hardcodes state=closed; build_rl filters on test_files —
+  # these keys are not read by code (kept as design intent):
   states: ["closed"]
   require_linked_pr: true
   require_tests_changed: true

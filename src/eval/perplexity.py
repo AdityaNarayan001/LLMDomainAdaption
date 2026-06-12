@@ -12,12 +12,31 @@ from pathlib import Path
 from src import config
 
 
-def perplexity(model_path: str, heldout_jsonl: str, max_samples: int = 500) -> float:
-    import torch  # lazy
+def _load(model_path: str):
+    """Load a full model dir/hub id — OR a LoRA adapter-only dir (adapter_config.json, no
+    config.json), which plain from_pretrained rejects with OSError. The SFT overfit guard
+    passes models/sft (an adapter), so without this branch the guard silently never runs."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype="auto", device_map="auto")
+    p = config.ROOT / model_path
+    if (p / "adapter_config.json").exists() and not (p / "config.json").exists():
+        import json as _json
+        from peft import PeftModel
+        base = _json.loads((p / "adapter_config.json").read_text())["base_model_name_or_path"]
+        tok = AutoTokenizer.from_pretrained(base)
+        model = AutoModelForCausalLM.from_pretrained(base, torch_dtype="auto", device_map="auto")
+        model = PeftModel.from_pretrained(model, str(p))
+    else:
+        tok = AutoTokenizer.from_pretrained(model_path)
+        model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype="auto",
+                                                     device_map="auto")
+    return tok, model
+
+
+def perplexity(model_path: str, heldout_jsonl: str, max_samples: int = 500) -> float:
+    import torch  # lazy
+
+    tok, model = _load(model_path)
     model.eval()
 
     nll, ntok = 0.0, 0

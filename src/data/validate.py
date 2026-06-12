@@ -18,16 +18,21 @@ import sys
 from src import config
 
 
+_MALFORMED: dict[str, int] = {}    # file -> dropped-line count (reported as warnings)
+
+
 def _lines(name: str) -> list[dict]:
     p = config.ROOT / "data/datasets" / name
     if not p.exists():
         return []
     out = []
     for ln in p.read_text().splitlines():
+        if not ln.strip():
+            continue
         try:
             out.append(json.loads(ln))
         except json.JSONDecodeError:
-            pass  # malformed line — counted as a schema problem below via the count gap
+            _MALFORMED[name] = _MALFORMED.get(name, 0) + 1
     return out
 
 
@@ -94,13 +99,56 @@ def validate(cfg: dict) -> int:
         bad = [t for t in rl if not t.get("task_id") or not t.get("test_files")]
         if bad:
             warn.append(f"{len(bad)} RL tasks missing task_id/test_files")
-        leaked = _eval_task_ids() & {t.get("task_id") for t in rl}
+        ids = [t.get("task_id") for t in rl]
+        dupes = {i for i in ids if ids.count(i) > 1}
+        if dupes:
+            fatal.append(f"{len(dupes)} DUPLICATE task_ids in rl_tasks.jsonl ({list(dupes)[:3]}…)"
+                         " — re-running a builder appended copies")
+        leaked = _eval_task_ids() & set(ids)
         if leaked:
             fatal.append(f"DECONTAM: {len(leaked)} RL tasks leak into eval_sets/ ({list(leaked)[:3]}…)")
         frac = _rl_repro_fraction(cfg, rl)
         print(f"[validate] RL reproducibility sample: {frac:.0%} had resolvable parent + tests present")
         if frac < 0.5:
             warn.append(f"only {frac:.0%} of sampled RL tasks look reproducible (check git history depth)")
+        # execution tasks must be verifiable: setup_patch (synthetic) or fail_to_pass (mined)
+        exec_dead = [t["task_id"] for t in rl if t.get("verify_mode") == "execution"
+                     and not t.get("setup_patch") and not t.get("fail_to_pass")]
+        if exec_dead:
+            fatal.append(f"{len(exec_dead)} execution-mode tasks have NEITHER setup_patch nor "
+                         f"fail_to_pass — their reward is structurally dead ({exec_dead[:3]}…)")
+        # pattern tasks need gold_patch or similarity reward is silently 0 (capped at 0.15)
+        pat = [t for t in rl if t.get("verify_mode") == "pattern"]
+        pat_dead = [t["task_id"] for t in pat if not t.get("gold_patch")]
+        if pat and len(pat_dead) == len(pat):
+            fatal.append("ALL pattern tasks lack gold_patch — similarity reward is dead; "
+                         "re-run build_rl (it now mines the PR diff)")
+        elif pat_dead:
+            warn.append(f"{len(pat_dead)}/{len(pat)} pattern tasks lack gold_patch (similarity=0)")
+        # synthetic mutants: the injected bug must actually git-apply at its parent commit —
+        # a silently-unapplied mutant INVERTS the reward (garbage scores 1.0, gold scores 0.0)
+        repo = config.ROOT / cfg["source"]["raw_repo"]
+        synth = [t for t in rl if t.get("setup_patch")][:10]
+        bad_patch = []
+        for t in synth:
+            r = subprocess.run(["git", "-C", str(repo), "apply", "--check", "-"],
+                               input=t["setup_patch"], text=True, capture_output=True)
+            if r.returncode != 0:
+                bad_patch.append(t["task_id"])
+        if bad_patch:
+            fatal.append(f"{len(bad_patch)}/{len(synth)} sampled setup_patches do NOT apply "
+                         f"({bad_patch[:3]}…) — these tasks would invert the reward")
+        # parquet must mirror the jsonl — a stale parquet trains on a different task set
+        pq = config.ROOT / "data/datasets/rl_verl_train.parquet"
+        if pq.exists():
+            try:
+                import pandas as pd
+                n_pq = len(pd.read_parquet(pq))
+                if n_pq != len(rl):
+                    warn.append(f"rl_verl_train.parquet has {n_pq} rows but rl_tasks.jsonl has "
+                                f"{len(rl)} — STALE parquet; re-run build_verl")
+            except Exception:
+                pass  # pandas not in this venv — checked again in the RL venv
 
     # --- SFT: instructions schema, trajectories non-empty ---
     instr = _lines("sft_instructions.jsonl")
@@ -111,6 +159,8 @@ def validate(cfg: dict) -> int:
         print(f"[validate] SFT: {len(instr)} instructions, {len(traj)} verified trajectories")
 
     # --- report ---
+    for fn, cnt in _MALFORMED.items():
+        warn.append(f"{fn}: {cnt} malformed JSON line(s) dropped")
     for w in warn:
         print(f"[validate] WARN: {w}", flush=True)
     for fz in fatal:

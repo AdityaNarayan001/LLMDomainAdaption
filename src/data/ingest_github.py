@@ -23,8 +23,23 @@ def _token() -> str | None:
 
 
 def _pr_record(pr: dict, headers: dict) -> "PRRecord":
-    fr = requests.get(pr["url"] + "/files", params={"per_page": 100}, headers=headers, timeout=60)
-    files = [f["filename"] for f in fr.json()] if fr.ok else []
+    # PAGINATE /files: a PR touching >100 files would otherwise get a truncated list,
+    # silently corrupting crates_touched/single_crate/verify_mode downstream. And an API
+    # error (rate-limit 403 is likely at 1000 PRs) must be LOUD — a quietly-empty file list
+    # makes build_rl drop the PR with zero trace.
+    files: list[str] = []
+    page = 1
+    while True:
+        fr = requests.get(pr["url"] + "/files", params={"per_page": 100, "page": page},
+                          headers=headers, timeout=60)
+        if not fr.ok:
+            raise RuntimeError(f"GitHub /files failed for PR #{pr.get('number')}: "
+                               f"{fr.status_code} {fr.text[:200]}")
+        chunk = [f["filename"] for f in fr.json()]
+        files += chunk
+        if len(chunk) < 100:
+            break
+        page += 1
     tests = [f for f in files if "/tests/" in f or f.endswith("_test.rs") or f.startswith("tests/")]
     m = _CLOSES.search(pr.get("body") or "")
     return PRRecord(number=pr["number"], title=pr.get("title", ""), body=pr.get("body") or "",

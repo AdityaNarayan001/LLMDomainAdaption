@@ -104,7 +104,9 @@ class ToolBox:
         return "\n".join(lines[(start or 1) - 1 : end or len(lines)])
 
     def edit_file(self, path: str, old: str, new: str) -> str:
-        if path in self.protected_paths:
+        # normalize before the protected check — "./tests/x.rs" must not bypass "tests/x.rs"
+        norm = str(Path(path)) if not path.startswith("/") else path
+        if norm in self.protected_paths or path in self.protected_paths:
             self.tampered = True  # attempted to touch hidden tests/manifest -> reward=0
             return "ERROR: file is read-only (protected)."
         p = self._resolve(path)
@@ -116,18 +118,24 @@ class ToolBox:
 
     def bash(self, cmd: str) -> str:
         # tamper guard: block edits to protected paths and VCS escapes via shell
+        # ("chmod" included: `chmod +w tests/x.rs` would defeat the 0444 write-protection)
         lowered = cmd.replace(" ", "")
         if any(pp.replace(" ", "") in lowered for pp in self.protected_paths) and (
-            ">" in cmd or "sed" in cmd or "tee" in cmd or "rm" in cmd
+            ">" in cmd or "sed" in cmd or "tee" in cmd or "rm" in cmd or "chmod" in cmd
         ):
             self.tampered = True
             return "ERROR: command touches a protected path."
         if "git checkout" in cmd or "git restore" in cmd:
             self.tampered = True
             return "ERROR: VCS restore of gold files is not allowed."
-        res = subprocess.run(
-            cmd, shell=True, cwd=self.workdir, capture_output=True, text=True, timeout=600
-        )
+        try:
+            res = subprocess.run(
+                cmd, shell=True, cwd=self.workdir, capture_output=True, text=True, timeout=600
+            )
+        except subprocess.TimeoutExpired:
+            # a slow cargo build must NOT raise through the rollout loop and kill the
+            # whole eval suite / training cycle — report it to the model as feedback
+            return "ERROR: command timed out (600s). Use targeted builds (cargo check -p <crate>)."
         return (res.stdout + res.stderr)[:8000]
 
     def grep(self, pattern: str, glob: str = "") -> str:
@@ -148,10 +156,19 @@ class ToolBox:
 
 def nextest_json(workdir: Path, package: str | None) -> dict:
     """Run cargo nextest with structured JSON output (NEVER log-scrape — Risk R11)."""
+    import os
     cmd = ["cargo", "nextest", "run", "--message-format", "libtest-json"]
     if package:
         cmd += ["-p", package]
-    res = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, timeout=1800)
+    # libtest-json is gated behind this env var — without it nextest ERRORS, zero events
+    # parse, and the empty passed/failed lists silently zero the test reward everywhere.
+    env = {**os.environ, "NEXTEST_EXPERIMENTAL_LIBTEST_JSON": "1",
+           "PATH": os.path.expanduser("~/.cargo/bin") + os.pathsep + os.environ.get("PATH", "")}
+    try:
+        res = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True,
+                             timeout=1800, env=env)
+    except subprocess.TimeoutExpired:
+        return {"exit_code": -1, "passed": [], "failed": [], "error": "nextest timed out"}
     passed, failed = [], []
     for line in res.stdout.splitlines():
         try:
@@ -160,4 +177,9 @@ def nextest_json(workdir: Path, package: str | None) -> dict:
             continue
         if ev.get("type") == "test" and ev.get("event") in ("ok", "failed"):
             (passed if ev["event"] == "ok" else failed).append(ev.get("name", "?"))
-    return {"exit_code": res.returncode, "passed": passed, "failed": failed}
+    out = {"exit_code": res.returncode, "passed": passed, "failed": failed}
+    if res.returncode != 0 and not passed and not failed:
+        # nonzero exit with ZERO parsed events = the run itself broke (toolchain/flag/build
+        # error), not "all tests failed" — surface it so callers don't read it as empty-pass.
+        out["error"] = (res.stderr or res.stdout)[-500:]
+    return out

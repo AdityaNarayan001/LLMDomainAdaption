@@ -38,19 +38,34 @@ class Trajectory:
 
 
 def setup_workdir(task: dict, base_repo: Path | None = None) -> tuple[Path, set[str]]:
-    """Materialize a fresh checkout @ parent_commit. Returns (workdir, protected_paths)."""
+    """Materialize a fresh checkout @ parent_commit. Returns (workdir, protected_paths).
+
+    Raises (and cleans up the workdir) on ANY setup failure. The setup_patch apply in
+    particular must be LOUD: a silently-unapplied mutant leaves tests green, which INVERTS
+    the reward — garbage patches that merely apply score 1.0, the gold fix scores 0.0.
+    """
     base_repo = base_repo or (config.ROOT / "data/hyperswitch")
     workdir = Path(tempfile.mkdtemp(prefix="hs_rollout_"))
-    # cheap local clone + checkout (shares objects via --shared for speed)
-    subprocess.run(["git", "clone", "--shared", str(base_repo), str(workdir)], check=True,
-                   capture_output=True)
-    if task.get("parent_commit"):
-        subprocess.run(["git", "-C", str(workdir), "checkout", "-q", task["parent_commit"]],
-                       check=True)
-    # bug-injection tasks: apply the mutant so the crate's tests fail; the model must repair it
-    if task.get("setup_patch"):
-        subprocess.run(["git", "apply", "-"], input=task["setup_patch"], text=True,
-                       cwd=workdir, check=False, capture_output=True)
+    try:
+        # cheap local clone + checkout (shares objects via --shared for speed; safe because the
+        # base repo is never GC'd/pruned while rollouts run)
+        subprocess.run(["git", "clone", "--shared", str(base_repo), str(workdir)], check=True,
+                       capture_output=True)
+        if task.get("parent_commit"):
+            subprocess.run(["git", "-C", str(workdir), "checkout", "-q", task["parent_commit"]],
+                           check=True, capture_output=True)
+        # bug-injection tasks: apply the mutant so the crate's tests fail; the model must repair it
+        if task.get("setup_patch"):
+            r = subprocess.run(["git", "apply", "-"], input=task["setup_patch"], text=True,
+                               cwd=workdir, capture_output=True)
+            if r.returncode != 0:
+                raise RuntimeError(
+                    f"setup_patch failed to apply for {task.get('task_id', '?')} — task invalid "
+                    f"(would invert the reward): {r.stderr.strip()[:300]}"
+                )
+    except BaseException:
+        shutil.rmtree(workdir, ignore_errors=True)   # no orphaned hs_rollout_* dirs on failure
+        raise
     protected = set(task.get("test_files", [])) | {"Cargo.toml", "Cargo.lock"}
     # write-protect the hidden tests so a bash-wielding agent can't weaken them
     for rel in protected:
@@ -156,10 +171,17 @@ def verify_fail_to_pass(task) -> bool:
         before = tools.nextest_json(workdir, pkg)
         if not before["failed"]:
             return False  # nothing failing at parent => not a FAIL_TO_PASS we can verify
-        subprocess.run(["git", "-C", str(workdir), "checkout", "-q",
-                        t["pr_number"] and f"{t['parent_commit']}"], check=False)
-        # apply gold change by checking out the merge commit's versions of changed files
-        # (kept simple here; real impl applies the PR diff)
+        if t.get("gold_patch"):
+            applied = subprocess.run(["git", "apply", "-"], input=t["gold_patch"], text=True,
+                                     cwd=workdir, capture_output=True).returncode == 0
+        elif t.get("setup_patch"):
+            # synthetic bug-injection: the gold fix IS the reverse of the injected mutant
+            applied = subprocess.run(["git", "apply", "-R", "-"], input=t["setup_patch"],
+                                     text=True, cwd=workdir, capture_output=True).returncode == 0
+        else:
+            return False  # no gold diff available for this task — cannot verify
+        if not applied:
+            return False
         after = tools.nextest_json(workdir, pkg)
         return not after["failed"]
     finally:

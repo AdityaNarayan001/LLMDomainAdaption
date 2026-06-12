@@ -38,6 +38,8 @@ def build() -> int:
                 "fail_to_pass": t.get("fail_to_pass", []),
                 "setup_patch": t.get("setup_patch"),     # bug-injection: inject before grading
                 "verify_cmd": t.get("verify_cmd"),        # e.g. "cargo test -p euclid"
+                "gold_patch": t.get("gold_patch"),        # pattern-mode similarity target —
+                                                          # without it similarity reward is 0
             },
         })
     out = config.ROOT / "data/datasets/rl_verl_train.parquet"

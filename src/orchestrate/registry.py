@@ -32,6 +32,9 @@ class Checkpoint:
     sequestered_lcb: float | None = None   # set at milestones (Tier-2 crowning)
     hs_swe_solve: float | None = None       # for the non-regression guard
     created_at: float = field(default=0.0)  # stamped by caller (no wall-clock in libs)
+    promoted: bool = False            # did the McNemar gate fire? best() ranks ONLY promoted
+                                      # rows — else a lucky non-promoted candidate becomes
+                                      # champion and the gate is decorative
 
 
 class Registry:
@@ -56,15 +59,21 @@ class Registry:
         return out
 
     def best(self) -> Checkpoint | None:
+        """Champion = best among PROMOTED checkpoints (the gate must have fired). Falls back
+        to all rows only when nothing has ever been promoted (cycle-0 bootstrap)."""
         cks = self.all()
-        return max(cks, key=lambda c: c.solve_rate) if cks else None
+        if not cks:
+            return None
+        gated = [c for c in cks if c.promoted]
+        return max(gated or cks, key=lambda c: c.solve_rate)
 
     def promote(self, candidate: Checkpoint, incumbent: Checkpoint | None,
                 gate_promote: bool) -> Checkpoint:
         """New champion only if the gate fired (else keep incumbent). Candidate is still
         recorded so retention can keep it in the top-K hedge."""
+        candidate.promoted = bool(incumbent is None or gate_promote)
         self.record(candidate)
-        if incumbent is None or gate_promote:
+        if candidate.promoted:
             return candidate
         return incumbent
 

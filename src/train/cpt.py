@@ -82,6 +82,20 @@ def axolotl_config_for_phase(cfg: dict, phase: dict, prev_ckpt: str | None) -> d
     return ax
 
 
+def _phase_complete(out_dir: Path) -> bool:
+    """A phase is complete only if ALL weight shards landed. config.json + a partial shard
+    set (crash mid-final-save: a multi-shard 7B writes over minutes) must NOT count — a
+    wrongly-skipped phase poisons every later stage."""
+    if not (out_dir / "config.json").exists():
+        return False
+    idx = out_dir / "model.safetensors.index.json"
+    if idx.exists():
+        import json as _json
+        shards = set(_json.loads(idx.read_text()).get("weight_map", {}).values())
+        return bool(shards) and all((out_dir / s).exists() for s in shards)
+    return (out_dir / "model.safetensors").exists()
+
+
 def run(dry_run: bool = False) -> None:
     cfg = config.load("cpt")
     config.ensure_dirs()
@@ -90,7 +104,7 @@ def run(dry_run: bool = False) -> None:
         out_dir = config.ROOT / "models/cpt" / phase["name"]
         # resumable: skip a phase whose final model is already saved (e.g. after a mid-curriculum
         # restart), and carry it forward as the base for the next phase.
-        if not dry_run and (out_dir / "config.json").exists() and any(out_dir.glob("*.safetensors")):
+        if not dry_run and _phase_complete(out_dir):
             print(f"[CPT] phase={phase['name']} already trained ({out_dir}) — skipping")
             prev = f"models/cpt/{phase['name']}"
             continue
@@ -100,7 +114,8 @@ def run(dry_run: bool = False) -> None:
         cfg_path.write_text(yaml.safe_dump(ax))
         print(f"[CPT] phase={phase['name']} (base={ax['base_model']}) -> {cfg_path}")
         if not dry_run:
-            subprocess.run([AXOLOTL, "train", str(cfg_path)], check=True, env=_VENV_ENV)
+            subprocess.run([AXOLOTL, "train", str(cfg_path)], check=True, env=_VENV_ENV,
+                           cwd=str(config.ROOT))  # emitted YAML uses ROOT-relative paths
         prev = ax["output_dir"]
 
 

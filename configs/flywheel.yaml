@@ -27,4 +27,11 @@ registry:
 stopping:
   plateau_patience_cycles: 5      # flat learning curve -> change curriculum/hyperparams, then escalate
 
-ledger: "runs/learning_curve.jsonl"
+# M1 census floor (execution-verifiable tasks). The plan's original 150 assumed real-PR
+# FAIL_TO_PASS supply; with the R4 rescope (synthetic bug-injection is the execution pool)
+# a small verified core ignites the flywheel — raise this as cargo-mutants coverage grows.
+census_min_tasks: 10
+
+# Separate file from runs/learning_curve.jsonl (the per-stage perplexity curve) — mixing
+# cycle rows into it made the file schema-soup for downstream readers.
+ledger: "runs/flywheel_ledger.jsonl"

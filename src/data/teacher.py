@@ -102,7 +102,10 @@ def sample_function_snippets(cfg: dict, n: int, seed: int = 0) -> list[tuple[str
     """Sample real function snippets (AST-extracted, fallback regex) to seed OSS-Instruct."""
     from src.data import ingest_repos
 
+    from src.data.build_cpt import is_heldout
+
     repo = config.ROOT / cfg["source"]["raw_repo"]
+    held_pct = int(float(cfg["cpt"].get("heldout_frac", 0.0)) * 100)
     files = ingest_repos.iter_source_files(cfg, repo)
     rng = random.Random(seed)
     rng.shuffle(files)
@@ -110,9 +113,13 @@ def sample_function_snippets(cfg: dict, n: int, seed: int = 0) -> list[tuple[str
     for p in files:
         if not str(p).endswith(".rs"):
             continue
+        rel = str(p.relative_to(repo))
+        if is_heldout(rel, held_pct):
+            continue  # NEVER seed SFT from held-out files — build_sft uses the snippet itself
+                      # as the gold target, which would train on the eval set verbatim
         code = p.read_text(encoding="utf-8", errors="ignore")
         for fn in ast_rust.extract_functions(code):
-            out.append((str(p.relative_to(repo)), fn))
+            out.append((rel, fn))
             if len(out) >= n:
                 return out
     return out
@@ -156,6 +163,7 @@ def generate(cfg: dict, teacher_cfg: dict, n: int = 2000, concurrency: int | Non
 
     ex = ThreadPoolExecutor(max_workers=concurrency)
     futs = [ex.submit(_one, p, s) for p, s in cands]
+    failures, first_err, wrote = 0, None, 0
     try:
         with out.open("a") as f:                 # APPEND — preserve existing, top up to n
             for fut in as_completed(futs):
@@ -163,15 +171,26 @@ def generate(cfg: dict, teacher_cfg: dict, n: int = 2000, concurrency: int | Non
                     break
                 try:
                     rec = fut.result()
-                except Exception:  # pragma: no cover - network/parse dependent
+                except Exception as exc:  # pragma: no cover - network/parse dependent
+                    failures += 1
+                    first_err = first_err or repr(exc)
+                    # SYSTEMIC failure (endpoint down, json_schema unsupported, auth) must be
+                    # LOUD, not a quiet drain to 0 records that "succeeds":
+                    if wrote == 0 and failures >= concurrency:
+                        raise RuntimeError(
+                            f"teacher generation failing systemically ({failures} consecutive "
+                            f"failures, 0 successes). First error: {first_err}") from exc
                     continue
+                done.add(rec.get("snippet"))     # streamed — guards within-run duplicates too
                 f.write(json.dumps(rec) + "\n")
                 f.flush()                        # crash-safe: persisted as each completes
-                have += 1
+                have += 1; wrote += 1
                 if have % 50 == 0:
                     print(f"  generated {have}/{n} instructions ({concurrency}x) -> {out.name}", flush=True)
     finally:
         ex.shutdown(wait=False, cancel_futures=True)   # cancel the over-sampled extras
+    if failures:
+        print(f"  ({failures} generations failed; first error: {first_err})", flush=True)
     print(f"  {have}/{n} instructions ({concurrency}-way concurrent) -> {out.name}", flush=True)
     return have
 
@@ -190,10 +209,21 @@ def gen_trajectories(endpoint: str, model: str, weights: dict, n_tasks: int = 20
     tasks = [json.loads(line) for line in tasks_path.read_text().splitlines()][:n_tasks]
     out = config.ROOT / "data/datasets/sft_trajectories_raw.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
-    written = 0
-    with out.open("w") as f:
+    # RESUMABLE: these rollouts are the most expensive data-gen step — a "w" rewrite here
+    # used to clobber everything on re-run. Append, skipping the (task, sample) pairs that
+    # are already covered by the existing line count.
+    have = sum(1 for ln in out.read_text().splitlines() if ln.strip()) if out.exists() else 0
+    target = len(tasks) * samples_per_task
+    if have >= target:
+        print(f"  trajectories already complete ({have} >= {target}) — skipping")
+        return have
+    written, idx = 0, -1
+    with out.open("a") as f:
         for task in tasks:
             for _ in range(samples_per_task):
+                idx += 1
+                if idx < have:
+                    continue                     # already generated in a previous run
                 try:
                     traj = runner.run_task(task, endpoint=endpoint, model=model,
                                            weights=weights, temperature=0.8)

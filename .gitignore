@@ -1,6 +1,4 @@
-.venv/
-.venv-serve/
-.venv-rl/
+.venv*/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -20,4 +18,7 @@ __pycache__/
 target/
 sccache/
 
-# NOTE: eval_sets/ is intentionally COMMITTED (public repo) for reproducibility.
+# NOTE: eval_sets/ is intentionally COMMITTED (public repo) for reproducibility —
+# EXCEPT generated artifacts (deterministically rebuilt by build_cpt / build_rl_synthetic):
+/eval_sets/heldout_code.jsonl
+/eval_sets/trivial/

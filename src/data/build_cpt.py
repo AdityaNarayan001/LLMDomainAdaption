@@ -26,6 +26,15 @@ from src.data import ast_rust, ingest_repos
 FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE = "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"
 
 
+def is_heldout(rel_path: str, held_pct: int) -> bool:
+    """THE held-out predicate (deterministic path-hash split). Shared by every producer of
+    training data — phase 1 packing, phase 2 commit-diff filtering, and the SFT teacher's
+    snippet sampler — so held-out file content cannot leak into training via ANY channel."""
+    if not held_pct:
+        return False
+    return int(hashlib.sha256(rel_path.encode()).hexdigest(), 16) % 100 < held_pct
+
+
 def _approx_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
@@ -106,25 +115,36 @@ def build_phase1(cfg: dict):
     with held_path.open("w") as hf:
         for idx, (rel, content) in enumerate(pairs):
             body = marker.format(path=rel) + content
-            if held_pct and int(hashlib.sha256(rel.encode()).hexdigest(), 16) % 100 < held_pct:
+            if is_heldout(rel, held_pct):
                 hf.write(json.dumps({"training_content": body, "meta": {"path": rel, "split": "heldout"}}) + "\n")
                 n_held += 1
                 continue  # never train on held-out files
-            # deterministic FIM assignment (no RNG -> reproducible): alternate PSM/SPM
-            if rel.endswith(".rs") and (idx % 100) < int(fim_rate * 100):
-                body = apply_fim(body, "psm" if idx % 2 == 0 else "spm")
+            # deterministic FIM assignment by PATH HASH (no RNG -> reproducible). Hashing (not
+            # idx) avoids the positional artifact where contiguous dependency-ordered blocks —
+            # often whole crates — were uniformly all-FIM or all-plain.
+            h = int(hashlib.sha256(rel.encode()).hexdigest(), 16)
+            if rel.endswith(".rs") and (h // 100) % 100 < int(fim_rate * 100):
+                body = apply_fim(body, "psm" if h % 2 == 0 else "spm")
             n_train += 1
             yield Packed(training_content=body, meta={"path": rel, "phase": "foundation"})
     print(f"  phase1: {n_train} train, {n_held} held-out -> eval_sets/heldout_code.jsonl", flush=True)
 
 
 def build_phase2(cfg: dict, max_commits: int = 5000):
-    """Evolution: conventional-commit message + diff as intent->change pairs (streamed)."""
+    """Evolution: conventional-commit message + diff as intent->change pairs (streamed).
+
+    Commits touching HELD-OUT files are skipped entirely: their diff hunks carry held-out
+    file content (±context lines) straight into training, contaminating the held-out
+    perplexity signal phase 1 carefully protects. (Measured before this fix: ~7% of
+    phase-2 samples carried held-out content.)
+    """
     repo = config.ROOT / cfg["source"]["raw_repo"]
+    held_pct = int(float(cfg["cpt"].get("heldout_frac", 0.0)) * 100)
     log = subprocess.run(
         ["git", "-C", str(repo), "log", f"-n{max_commits}", "--format=%H%x00%s%x00%b"],
         capture_output=True, text=True, check=True,
     ).stdout
+    n_skipped = 0
     for line in log.split("\n"):
         if not line.strip():
             continue
@@ -132,12 +152,21 @@ def build_phase2(cfg: dict, max_commits: int = 5000):
         if len(parts) < 2:
             continue
         sha, subject = parts[0], parts[1]
+        touched = subprocess.run(
+            ["git", "-C", str(repo), "show", "--format=", "--name-only", sha],
+            capture_output=True, text=True, check=False,
+        ).stdout.splitlines()
+        if any(is_heldout(f, held_pct) for f in touched if f.strip()):
+            n_skipped += 1
+            continue  # decontamination: commit touches a held-out file
         diff = subprocess.run(
             ["git", "-C", str(repo), "show", "--format=", "--unified=3", sha],
             capture_output=True, text=True, check=False,
         ).stdout[:20000]  # cap diff size
         content = f"# Commit intent\n{subject}\n\n# Change\n{diff}"
         yield Packed(training_content=content, meta={"sha": sha, "phase": "evolution"})
+    if n_skipped:
+        print(f"  phase2: skipped {n_skipped} commits touching held-out files (decontam)", flush=True)
 
 
 _TEMPLATE_CHECKLIST = re.compile(r"^\s*-\s*\[[ xX]\]")          # "- [ ] Bugfix" template items
