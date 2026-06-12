@@ -45,7 +45,7 @@ serve_model(){ # $1=model $2=quant ; (re)launch vLLM alone, health-wait
   # at 0.6 util on the shared unified pool; 64K covers teacher prompts + student rollouts (<=16K).
   PATH="$PWD/.venv-serve/bin:$PATH" \
   .venv-serve/bin/python -m vllm.entrypoints.openai.api_server --model "$1" --port 8000 \
-      --max-num-seqs 256 --gpu-memory-utilization 0.6 --max-model-len 65536 "${q[@]}" \
+      --max-num-seqs 256 --gpu-memory-utilization 0.6 --max-model-len 32768 "${q[@]}" \
       > "runs/vllm_${TS}.log" 2>&1 &
   VLLM_PID=$!
   for i in $(seq 1 120); do
@@ -74,9 +74,12 @@ echo ">>> [A] build datasets (SFT data-gen distills from the served teacher @ :8
 scripts/run_pipeline.sh data || halt "dataset build failed"
 stop_vllm                                              # free the teacher before training
 
-# ---- PHASE B: train student (no vLLM resident) ----
+# ---- PHASE B: train student (no vLLM resident). Eval at each boundary -> learning curve. ----
+echo ">>> [B] baseline eval (un-tuned base)"; scripts/run_pipeline.sh eval --model "$MODEL" --tag base || true
 echo ">>> [B] CPT";           scripts/run_pipeline.sh cpt || halt "CPT failed"
+echo ">>> [B] eval after CPT"; scripts/run_pipeline.sh eval --model models/cpt/pr_mastery --tag cpt || true
 echo ">>> [B] SFT";           scripts/run_pipeline.sh sft || halt "SFT failed"
+echo ">>> [B] eval after SFT"; scripts/run_pipeline.sh eval --model models/sft --tag sft || true
 
 # ---- PHASE C: serve student -> census gate -> flywheel (RL/eval) ----
 serve_model "$MODEL" "$QUANT" || halt "student vLLM failed"

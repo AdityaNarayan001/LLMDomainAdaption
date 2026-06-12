@@ -75,7 +75,10 @@ def axolotl_config_for_phase(cfg: dict, phase: dict, prev_ckpt: str | None) -> d
             "use_rslora": rs["use_rslora"], "lora_target_modules": rs["target_modules"],
         })
     if prev_ckpt:
-        ax["resume_from_checkpoint"] = prev_ckpt  # anti-forgetting carry-over
+        # carry-over: start this phase FROM the previous phase's trained weights (full-FT) — NOT
+        # resume_from_checkpoint (that resumes the same run + needs trainer_state.json; we want a
+        # fresh trainer/schedule on the new phase's data, seeded by the prior phase's model).
+        ax["base_model"] = prev_ckpt
     return ax
 
 
@@ -84,11 +87,18 @@ def run(dry_run: bool = False) -> None:
     config.ensure_dirs()
     prev = None
     for phase in cfg["curriculum"]["phases"]:
+        out_dir = config.ROOT / "models/cpt" / phase["name"]
+        # resumable: skip a phase whose final model is already saved (e.g. after a mid-curriculum
+        # restart), and carry it forward as the base for the next phase.
+        if not dry_run and (out_dir / "config.json").exists() and any(out_dir.glob("*.safetensors")):
+            print(f"[CPT] phase={phase['name']} already trained ({out_dir}) — skipping")
+            prev = f"models/cpt/{phase['name']}"
+            continue
         ax = axolotl_config_for_phase(cfg, phase, prev if cfg["curriculum"]["load_previous_adapter"] else None)
         cfg_path = config.RUNS / f"axolotl_cpt_{phase['name']}.yaml"
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text(yaml.safe_dump(ax))
-        print(f"[CPT] phase={phase['name']} -> {cfg_path}")
+        print(f"[CPT] phase={phase['name']} (base={ax['base_model']}) -> {cfg_path}")
         if not dry_run:
             subprocess.run([AXOLOTL, "train", str(cfg_path)], check=True, env=_VENV_ENV)
         prev = ax["output_dir"]

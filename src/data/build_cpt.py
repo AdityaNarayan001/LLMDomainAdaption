@@ -96,13 +96,26 @@ def build_phase1(cfg: dict):
 
     fim_rate = cfg["cpt"]["fim_rate"]
     marker = cfg["cpt"]["file_marker"]
+    # Hold out heldout_frac of files (deterministic by path hash) for the EVAL baseline — these are
+    # EXCLUDED from training so held-out perplexity is a clean knowledge-injection signal (decontam).
+    held_pct = int(float(cfg["cpt"].get("heldout_frac", 0.0)) * 100)
+    held_path = config.ROOT / "eval_sets/heldout_code.jsonl"
+    held_path.parent.mkdir(parents=True, exist_ok=True)
+    n_train = n_held = 0
     # Each packed sample = one file (document-masked => no cross-file attention bleed).
-    for idx, (rel, content) in enumerate(pairs):
-        body = marker.format(path=rel) + content
-        # deterministic FIM assignment (no RNG -> reproducible): alternate PSM/SPM
-        if rel.endswith(".rs") and (idx % 100) < int(fim_rate * 100):
-            body = apply_fim(body, "psm" if idx % 2 == 0 else "spm")
-        yield Packed(training_content=body, meta={"path": rel, "phase": "foundation"})
+    with held_path.open("w") as hf:
+        for idx, (rel, content) in enumerate(pairs):
+            body = marker.format(path=rel) + content
+            if held_pct and int(hashlib.sha256(rel.encode()).hexdigest(), 16) % 100 < held_pct:
+                hf.write(json.dumps({"training_content": body, "meta": {"path": rel, "split": "heldout"}}) + "\n")
+                n_held += 1
+                continue  # never train on held-out files
+            # deterministic FIM assignment (no RNG -> reproducible): alternate PSM/SPM
+            if rel.endswith(".rs") and (idx % 100) < int(fim_rate * 100):
+                body = apply_fim(body, "psm" if idx % 2 == 0 else "spm")
+            n_train += 1
+            yield Packed(training_content=body, meta={"path": rel, "phase": "foundation"})
+    print(f"  phase1: {n_train} train, {n_held} held-out -> eval_sets/heldout_code.jsonl", flush=True)
 
 
 def build_phase2(cfg: dict, max_commits: int = 5000):

@@ -36,6 +36,8 @@ def build() -> int:
                 "verify_mode": t.get("verify_mode", "pattern"),
                 "test_files": t.get("test_files", []),
                 "fail_to_pass": t.get("fail_to_pass", []),
+                "setup_patch": t.get("setup_patch"),     # bug-injection: inject before grading
+                "verify_cmd": t.get("verify_cmd"),        # e.g. "cargo test -p euclid"
             },
         })
     out = config.ROOT / "data/datasets/rl_verl_train.parquet"

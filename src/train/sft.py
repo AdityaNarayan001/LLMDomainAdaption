@@ -35,17 +35,21 @@ _VENV_ENV = _train_env()
 def axolotl_config(cfg: dict, cpt_ckpt: str, out_dir: str = "models/sft") -> dict:
     lora = cfg["method"]["lora"]
     hp = cfg["hyperparams"]
+    # Only include NON-EMPTY dataset files — at cold start sft_trajectories.jsonl is empty
+    # (0 verified rollouts), and axolotl raises StopIteration trying to load an empty JSON.
+    datasets = []
+    for path in (cfg["data"]["trajectories"], cfg["data"]["instructions"]):
+        p = config.ROOT / path
+        if p.exists() and p.stat().st_size > 0:
+            datasets.append({"path": path, "type": "chat_template", "train_on_inputs": False})
+    if not datasets:
+        raise SystemExit("[SFT] no non-empty SFT datasets — run gen_sft first")
     return {
         "base_model": cpt_ckpt,                       # stack on CPT
         "adapter": "qlora" if cfg["method"]["qlora"] else "lora",
         "lora_r": lora["r"], "lora_alpha": lora["alpha"], "lora_dropout": lora["dropout"],
         "lora_target_modules": lora["target_modules"],
-        "datasets": [
-            {"path": cfg["data"]["trajectories"], "type": "chat_template",
-             "train_on_inputs": False},   # assistant-only loss mask
-            {"path": cfg["data"]["instructions"], "type": "chat_template",
-             "train_on_inputs": False},
-        ],
+        "datasets": datasets,
         "sequence_len": hp["max_seq_len"],
         "learning_rate": hp["lr"], "lr_scheduler": hp["lr_schedule"],
         "warmup_ratio": hp["warmup_ratio"],
@@ -64,6 +68,9 @@ def axolotl_config(cfg: dict, cpt_ckpt: str, out_dir: str = "models/sft") -> dic
 def run(dry_run: bool = False, cpt_ckpt: str = "models/cpt/pr_mastery",
         out_dir: str = "models/sft") -> None:
     cfg = config.load("sft")
+    if not dry_run and (config.ROOT / out_dir / "adapter_model.safetensors").exists():
+        print(f"[SFT] {out_dir} already trained (adapter present) — skipping")
+        return
     ax = axolotl_config(cfg, cpt_ckpt, out_dir=out_dir)
     cfg_path = config.RUNS / "axolotl_sft.yaml"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,7 +81,7 @@ def run(dry_run: bool = False, cpt_ckpt: str = "models/cpt/pr_mastery",
     subprocess.run([AXOLOTL, "train", str(cfg_path)], check=True, env=_VENV_ENV)
 
     # overfit guard (decision: SFT quality gates everything downstream)
-    heldout = "data/datasets/cpt_heldout.jsonl"
+    heldout = "eval_sets/heldout_code.jsonl"
     try:
         reg = perplexity.forgetting_regression_pct(
             perplexity.perplexity(cpt_ckpt, heldout),

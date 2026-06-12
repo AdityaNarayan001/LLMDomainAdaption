@@ -25,6 +25,7 @@ case "$stage" in
             && "$PY" -m src.data.build_verl && "$PY" -m src.data.gen_sft \
             && "$PY" -m src.data.validate ;;          # sanity + decontam + RL-repro gate
   validate) "$PY" -m src.data.validate ;;
+  eval)     "$PY" -m src.eval.run_eval "$@" ;;        # baseline/per-stage held-out perplexity
   cpt)      "$PY" -m src.train.cpt "$@" ;;
   sft)      "$PY" -m src.train.sft "$@" ;;
   serve)    "$PY" -m vllm.entrypoints.openai.api_server "$@" ;;        # .venv-serve

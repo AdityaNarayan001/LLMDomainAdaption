@@ -46,6 +46,15 @@ def compute_score(data_source=None, solution_str: str = "", ground_truth=None,
         if not applied:
             return 0.0                       # doesn't even apply
         pkg = task["crates"][0] if task.get("single_crate") else None
+        if task.get("verify_cmd") and task.get("setup_patch"):
+            # bug-injection: setup_workdir injected the mutant; the model's patch must restore a
+            # green `cargo test -p <crate>` (cargo on PATH from the user's rustup).
+            import os
+            env = {**os.environ,
+                   "PATH": os.path.expanduser("~/.cargo/bin") + os.pathsep + os.environ.get("PATH", "")}
+            r = subprocess.run(task["verify_cmd"].split(), cwd=workdir, capture_output=True,
+                               text=True, env=env, timeout=900)
+            return 1.0 if r.returncode == 0 else 0.0
         if task.get("verify_mode") == "pattern":
             bd = reward_mod.pattern_reward(workdir, pkg, patch, task.get("gold_patch"),
                                            tampered=False, weights=_weights())

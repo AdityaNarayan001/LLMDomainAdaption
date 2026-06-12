@@ -47,6 +47,10 @@ def setup_workdir(task: dict, base_repo: Path | None = None) -> tuple[Path, set[
     if task.get("parent_commit"):
         subprocess.run(["git", "-C", str(workdir), "checkout", "-q", task["parent_commit"]],
                        check=True)
+    # bug-injection tasks: apply the mutant so the crate's tests fail; the model must repair it
+    if task.get("setup_patch"):
+        subprocess.run(["git", "apply", "-"], input=task["setup_patch"], text=True,
+                       cwd=workdir, check=False, capture_output=True)
     protected = set(task.get("test_files", [])) | {"Cargo.toml", "Cargo.lock"}
     # write-protect the hidden tests so a bash-wielding agent can't weaken them
     for rel in protected:
